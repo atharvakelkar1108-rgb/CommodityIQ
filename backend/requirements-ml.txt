@@ -1,0 +1,5 @@
+# Optional heavier ML stack (install on top of backend/requirements.txt)
+# FinBERT sentiment (ProsusAI/finbert):
+transformers>=4.40.0
+torch>=2.2.0
+safetensors>=0.4.0

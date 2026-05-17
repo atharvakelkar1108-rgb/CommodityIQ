@@ -1,0 +1,294 @@
+"""
+predictor.py  — 2D Multivariate LSTM
+──────────────────────────────────────
+Input features per timestep (7 features):
+  [Close_INR, Open_INR, High_INR, Low_INR, Volume,
+   Daily_Return%, USD_INR_Rate]
+
+Architecture:
+  Input(60, 7) → LSTM(128, return_seq=True) → Dropout(0.2)
+               → LSTM(64)                   → Dropout(0.2)
+               → Dense(32, relu)            → Dense(1)
+
+Predicts: next N days Close_INR
+"""
+
+import os, math, asyncio
+from pathlib import Path
+from typing import List, Dict, Optional
+
+import numpy as np
+import pandas as pd
+import joblib
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+import tensorflow as tf
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input, BatchNormalization
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from sklearn.preprocessing import MinMaxScaler
+
+from app.services.data_fetcher import COMMODITIES, PREDICTION_EXCLUDED
+
+MODELS_DIR   = Path(__file__).parent.parent / "models" / "trained"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+LOOKBACK      = 60
+N_FEATURES    = 7      # 2D: 7 input features per timestep
+FORECAST_DAYS = 7
+EPOCHS        = 60
+BATCH_SIZE    = 32
+
+FEATURE_COLS  = ["Close","Open","High","Low","Volume","Return","USD_INR"]
+
+
+class LSTMPredictor:
+
+    def __init__(self, data_fetcher):
+        self.fetcher  = data_fetcher
+        self._models  : Dict[str, tf.keras.Model] = {}
+        self._scalers : Dict[str, MinMaxScaler]   = {}
+
+    # ── Public API ────────────────────────────────────────────
+
+    def model_paths(self, ticker: str):
+        stem = ticker.replace("=", "_")
+        mp = MODELS_DIR / f"{stem}_2d_disp.keras"
+        sp = MODELS_DIR / f"{stem}_2d_disp_scaler.pkl"
+        return mp, sp
+
+    def has_trained_model(self, ticker: str) -> bool:
+        mp, sp = self.model_paths(ticker)
+        return mp.exists() and sp.exists()
+
+    async def predict(self, ticker: str, forecast_days: int = FORECAST_DAYS) -> Dict:
+        if ticker in PREDICTION_EXCLUDED:
+            return {"error": f"{ticker} is not enabled for LSTM prediction."}
+        model, scaler = await self._load_model(ticker)
+        if model is None:
+            return {
+                "error": (
+                    f"No saved model for {ticker}. Use Train Model once (~2–5 min); "
+                    "after that, Predict loads the saved model in seconds."
+                ),
+                "model_ready": False,
+            }
+
+        df = await self.fetcher.get_historical(ticker, period="1y", interval="1d")
+        if df.empty:
+            return {"error": f"No historical data for {ticker}"}
+
+        feat = self._build_features(df)
+        if feat is None or len(feat) < LOOKBACK:
+            return {"error": f"Not enough data for {ticker}"}
+
+        scaled      = scaler.transform(feat)
+        close_idx   = 0                          # Close_INR is column 0
+        seed        = scaled[-LOOKBACK:].reshape(1, LOOKBACK, N_FEATURES)
+
+        predictions_scaled = []
+        current = seed.copy()
+        for _ in range(forecast_days):
+            pred = float(model.predict(current, verbose=0)[0, 0])
+            predictions_scaled.append(pred)
+            # Roll window: shift left, append new row
+            # For unseen steps, repeat last feature row but update close
+            new_row          = current[0, -1, :].copy()
+            new_row[close_idx] = pred
+            current = np.append(current[:, 1:, :], [[new_row]], axis=1)
+
+        # Inverse-transform close column only
+        dummy       = np.zeros((len(predictions_scaled), N_FEATURES))
+        dummy[:, 0] = predictions_scaled
+        inv         = scaler.inverse_transform(dummy)
+        preds_inr   = inv[:, 0].tolist()
+
+        last_price = float(feat[-1, 0])          # last Close_Display (dashboard units)
+        last_date  = df.index[-1]
+        rate       = float(self.fetcher._usd_inr)
+        disp_last, disp_unit = self._live_display_baseline(ticker, last_price, rate)
+
+        forecast = []
+        for i, price in enumerate(preds_inr):
+            date   = pd.Timestamp(last_date) + pd.Timedelta(days=i+1)
+            p_disp = float(price)
+            change_d = round((p_disp - disp_last) / disp_last * 100, 2) if disp_last else 0.0
+            forecast.append({
+                "date":               date.strftime("%Y-%m-%d"),
+                "price_inr":          round(p_disp, 2),
+                "price_display_inr":  round(p_disp, 2),
+                "change_pct":         change_d,
+                "change_pct_display": change_d,
+            })
+
+        vol        = float(np.std(feat[-30:, 0]) / np.mean(feat[-30:, 0])) * 100
+        confidence = max(10, min(95, round(100 - vol * 2, 1)))
+
+        return {
+            "ticker":                  ticker,
+            "forecast":                forecast,
+            "confidence":              confidence,
+            "last_price_inr":          round(disp_last, 2),
+            "last_price_display_inr":  round(disp_last, 2),
+            "display_unit":            disp_unit or COMMODITIES.get(ticker, {}).get("unit", ""),
+            "model_type":              "2D Multivariate LSTM (7 features)",
+            "features_used":           FEATURE_COLS,
+            "lookback_days":           LOOKBACK,
+            "model_ready":             True,
+            "used_cached_model":       True,
+        }
+
+    async def train(self, ticker: str) -> Dict:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: self._train_sync(ticker))
+        self._models.pop(ticker, None)
+        self._scalers.pop(ticker, None)
+        return result
+
+    async def batch_train_all(self, tickers: List[str]) -> List[Dict]:
+        results = []
+        for t in tickers:
+            print(f"[Predictor] Training {t}...")
+            results.append(await self.train(t))
+        return results
+
+    # ── Internal helpers ──────────────────────────────────────
+
+    def _live_display_baseline(self, ticker: str, hist_last: float, rate: float):
+        """Use live dashboard display_price when available so forecast base matches the table."""
+        cached = self.fetcher.get_cached().get(ticker) or {}
+        live = cached.get("display_price")
+        if live is not None and float(live) > 0:
+            unit = cached.get("display_unit") or ""
+            return float(live), unit
+        unit = cached.get("display_unit") or COMMODITIES.get(ticker, {}).get("unit", "")
+        return float(hist_last), unit
+
+    def _ohlc_display_series(self, df: pd.DataFrame, col: str, rate: float) -> np.ndarray:
+        disp_col = f"{col}_Display"
+        if disp_col in df.columns:
+            return df[disp_col].values.astype(float)
+        inr_col = f"{col}_INR"
+        if inr_col in df.columns:
+            return df[inr_col].values.astype(float)
+        return (df[col].values.astype(float) * rate)
+
+    def _build_features(self, df: pd.DataFrame) -> Optional[np.ndarray]:
+        """Build 7-feature matrix; Close is in dashboard display units (₹/kg, ₹/10g, …)."""
+        try:
+            rate   = self.fetcher._usd_inr
+            close  = self._ohlc_display_series(df, "Close", rate)
+            open_  = self._ohlc_display_series(df, "Open", rate)
+            high   = self._ohlc_display_series(df, "High", rate)
+            low    = self._ohlc_display_series(df, "Low", rate)
+            vol    = df["Volume"].values.astype(float)
+            ret    = np.concatenate([[0], np.diff(close) / (close[:-1] + 1e-9) * 100])
+            usd_inr= np.full(len(close), rate)
+
+            feat   = np.column_stack([close, open_, high, low, vol, ret, usd_inr])
+            feat   = np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
+            return feat
+        except Exception as e:
+            print(f"[Predictor] Feature build failed: {e}")
+            return None
+
+    async def _load_model(self, ticker: str):
+        """Load a previously trained model from disk only — never train on Predict."""
+        if ticker in self._models:
+            return self._models[ticker], self._scalers[ticker]
+
+        mp, sp = self.model_paths(ticker)
+        if not mp.exists() or not sp.exists():
+            return None, None
+
+        try:
+            model = load_model(str(mp))
+            scaler = joblib.load(sp)
+        except Exception as exc:
+            print(f"[Predictor] Failed to load {ticker}: {exc}")
+            return None, None
+
+        self._models[ticker] = model
+        self._scalers[ticker] = scaler
+        return model, scaler
+
+    def _train_sync(self, ticker: str, return_objects: bool = False):
+        # Use the same resilient historical pipeline as the rest of the app.
+        # This includes Yahoo via requests with fallback synthetic data when needed.
+        df = self.fetcher._fetch_history(ticker, period="5y", interval="1d")
+        if df.empty or len(df) < LOOKBACK + 50:
+            msg = f"Insufficient data for {ticker}"
+            return (None, None) if return_objects else {"ticker": ticker, "status": "error", "message": msg}
+
+        rate = float(df["USD_INR_Rate"].iloc[-1]) if "USD_INR_Rate" in df.columns else self.fetcher._usd_inr
+        close = self._ohlc_display_series(df, "Close", rate)
+        open_ = self._ohlc_display_series(df, "Open", rate)
+        high  = self._ohlc_display_series(df, "High", rate)
+        low   = self._ohlc_display_series(df, "Low", rate)
+        vol   = df["Volume"].values.astype(float)
+        ret   = np.concatenate([[0], np.diff(close) / (close[:-1] + 1e-9) * 100])
+        uinr_rate = float(df["USD_INR_Rate"].iloc[-1]) if "USD_INR_Rate" in df.columns else self.fetcher._usd_inr
+        uinr  = np.full(len(close), uinr_rate)
+
+        feat  = np.column_stack([close, open_, high, low, vol, ret, uinr])
+        feat  = np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
+
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled = scaler.fit_transform(feat)
+
+        X, y = [], []
+        for i in range(LOOKBACK, len(scaled)):
+            X.append(scaled[i-LOOKBACK:i])          # shape (60, 7)
+            y.append(scaled[i, 0])                  # predict Close only
+
+        X = np.array(X)                             # (N, 60, 7)
+        y = np.array(y)
+
+        split   = int(len(X) * 0.85)
+        Xtr, Xv = X[:split], X[split:]
+        ytr, yv = y[:split], y[split:]
+
+        model = Sequential([
+            Input(shape=(LOOKBACK, N_FEATURES)),
+            LSTM(128, return_sequences=True),
+            BatchNormalization(),
+            Dropout(0.2),
+            LSTM(64, return_sequences=False),
+            BatchNormalization(),
+            Dropout(0.2),
+            Dense(32, activation="relu"),
+            Dense(1),
+        ])
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss="huber")
+
+        mp = MODELS_DIR / f"{ticker.replace('=','_')}_2d_disp.keras"
+        sp = MODELS_DIR / f"{ticker.replace('=','_')}_2d_disp_scaler.pkl"
+
+        cbs = [
+            EarlyStopping(patience=10, restore_best_weights=True, verbose=0),
+            ModelCheckpoint(str(mp), save_best_only=True, verbose=0),
+            ReduceLROnPlateau(patience=5, factor=0.5, verbose=0),
+        ]
+        history = model.fit(Xtr, ytr, validation_data=(Xv, yv),
+                            epochs=EPOCHS, batch_size=BATCH_SIZE,
+                            callbacks=cbs, verbose=0)
+
+        # RMSE on validation
+        vp   = model.predict(Xv, verbose=0).flatten()
+        dummy_true       = np.zeros((len(yv), N_FEATURES))
+        dummy_true[:, 0] = yv
+        dummy_pred       = np.zeros((len(vp), N_FEATURES))
+        dummy_pred[:, 0] = vp
+        true_inr = scaler.inverse_transform(dummy_true)[:, 0]
+        pred_inr = scaler.inverse_transform(dummy_pred)[:, 0]
+        rmse     = math.sqrt(np.mean((true_inr - pred_inr) ** 2))
+
+        joblib.dump(scaler, sp)
+        print(f"[Predictor] {ticker} 2D trained — RMSE ₹{rmse:.2f} — epochs {len(history.history['loss'])}")
+
+        summary = {"ticker": ticker, "status": "trained",
+                   "model_type": "2D Multivariate LSTM",
+                   "features": FEATURE_COLS,
+                   "val_rmse_inr": round(rmse, 2),
+                   "epochs_run": len(history.history["loss"])}
+        return (model, scaler) if return_objects else summary
