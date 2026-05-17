@@ -1,14 +1,43 @@
 import io, csv
 from datetime import datetime
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from typing import List
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict
+from typing import List, Tuple, Any
 
 router = APIRouter()
 
+_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _openpyxl_deps() -> Tuple[Any, Any, Any, Any, Any]:
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+
+        return openpyxl, Font, PatternFill, Alignment, get_column_letter
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Excel export requires openpyxl. Run: pip install openpyxl",
+        ) from exc
+
+
+def _xlsx_response(workbook, filename: str) -> Response:
+    output = io.BytesIO()
+    workbook.save(output)
+    data = output.getvalue()
+    return Response(
+        content=data,
+        media_type=_XLSX_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 class Holding(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     name:       str
     ticker:     str
     quantity:   float
@@ -63,12 +92,7 @@ async def export_prices_csv():
 
 @router.get("/prices/excel")
 async def export_prices_excel():
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment
-        from openpyxl.utils import get_column_letter
-    except ImportError:
-        return {"error": "Run: pip install openpyxl"}
+    openpyxl, Font, PatternFill, Alignment, get_column_letter = _openpyxl_deps()
 
     prices = await get_prices()
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -133,12 +157,7 @@ async def export_prices_excel():
             ws.row_dimensions[i].height = 17
 
     ws.freeze_panes = "A3"
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return StreamingResponse(output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=commodity_prices_{now}.xlsx"})
+    return _xlsx_response(wb, f"commodity_prices_{now}.xlsx")
 
 
 @router.post("/portfolio/csv")
@@ -164,12 +183,7 @@ async def export_portfolio_csv(req: PortfolioExportRequest):
 
 @router.post("/portfolio/excel")
 async def export_portfolio_excel(req: PortfolioExportRequest):
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment
-        from openpyxl.utils import get_column_letter
-    except ImportError:
-        return {"error": "Run: pip install openpyxl"}
+    openpyxl, Font, PatternFill, Alignment, get_column_letter = _openpyxl_deps()
 
     now    = datetime.now().strftime("%Y%m%d_%H%M%S")
     wb     = openpyxl.Workbook()
@@ -244,9 +258,4 @@ async def export_portfolio_excel(req: PortfolioExportRequest):
     ws.row_dimensions[tr].height = 20
     ws.freeze_panes = "A4"
 
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return StreamingResponse(output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=portfolio_{now}.xlsx"})
+    return _xlsx_response(wb, f"portfolio_{now}.xlsx")

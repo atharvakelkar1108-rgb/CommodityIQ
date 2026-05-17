@@ -14,13 +14,48 @@ function fmtInr(n) {
   return '₹'+n.toFixed(2)
 }
 
-function downloadBlob(data, filename, type) {
-  const url  = window.URL.createObjectURL(new Blob([data], { type }))
-  const a    = document.createElement('a')
-  a.href     = url
+async function isValidXlsxBlob(blob) {
+  if (!blob || blob.size < 4) return false
+  if (blob.type && blob.type.includes('json')) return false
+  const head = new Uint8Array(await blob.slice(0, 4).arrayBuffer())
+  // XLSX is a ZIP archive — starts with "PK"
+  return head[0] === 0x50 && head[1] === 0x4b
+}
+
+async function downloadBlob(data, filename, type) {
+  const blob = data instanceof Blob ? data : new Blob([data], { type })
+  if (type.includes('spreadsheet') && !(await isValidXlsxBlob(blob))) {
+    try {
+      const text = await blob.text()
+      const err = JSON.parse(text)
+      throw new Error(err.detail || err.error || 'Invalid Excel file from server')
+    } catch (e) {
+      if (e instanceof Error && e.message !== 'Invalid Excel file from server') throw e
+      throw new Error('Server did not return a valid Excel file. Install backend dep: pip install openpyxl')
+    }
+  }
+  const url = window.URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
   a.download = filename
   a.click()
   window.URL.revokeObjectURL(url)
+}
+
+async function exportErr(e) {
+  const d = e.response?.data
+  if (d instanceof Blob) {
+    try {
+      const j = JSON.parse(await d.text())
+      return j.detail || j.error || 'Export failed'
+    } catch {
+      return e.message || 'Export failed'
+    }
+  }
+  const detail = e.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) return detail.map((x) => x.msg || JSON.stringify(x)).join('; ')
+  return e.message || 'Export failed'
 }
 
 export default function ExportPage({ wsData }) {
@@ -52,10 +87,10 @@ export default function ExportPage({ wsData }) {
     setDL('prices_xlsx', true)
     try {
       const r = await api.get('/export/prices/excel', { responseType:'blob' })
-      downloadBlob(r.data, `commodity_prices_${new Date().toISOString().slice(0,10)}.xlsx`,
+      await downloadBlob(r.data, `commodity_prices_${new Date().toISOString().slice(0,10)}.xlsx`,
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
       toast.success('Prices exported as Excel!')
-    } catch { toast.error('Export failed') }
+    } catch (e) { toast.error(await exportErr(e)) }
     setDL('prices_xlsx', false)
   }
 
@@ -80,10 +115,10 @@ export default function ExportPage({ wsData }) {
         total_pnl:     totalPnl,
         total_pnl_pct: totalPnlPct,
       }, { responseType:'blob' })
-      downloadBlob(r.data, `portfolio_${new Date().toISOString().slice(0,10)}.xlsx`,
+      await downloadBlob(r.data, `portfolio_${new Date().toISOString().slice(0,10)}.xlsx`,
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
       toast.success('Portfolio exported as Excel!')
-    } catch { toast.error('Export failed') }
+    } catch (e) { toast.error(await exportErr(e)) }
     setDL('portfolio_xlsx', false)
   }
 
