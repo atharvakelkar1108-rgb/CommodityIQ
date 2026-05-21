@@ -22,11 +22,36 @@ BUSHEL_KG = {
 }
 
 # Import duty + GST multipliers (approximate)
+# Extra uplift so dashboard per-10g gold aligns with Indian retail/MCX quotes (~1.58–1.60L)
+INDIA_DISPLAY_FACTOR = {
+    "GC=F": 1.042,
+    "PL=F": 1.042,
+    "PA=F": 1.042,
+    "SI=F": 1.02,
+}
+
 DUTY = {
     "metals":      1.09,    # Gold/Silver: 6% customs + 3% GST
     "base_metals": 1.03,    # Copper etc: ~3%
     "energy":      1.03,    # Crude etc
     "agricultural":1.05,    # ~5%
+}
+
+# Extra alignment for India retail portals (Goodreturns/MCX-style 24k quotes)
+INDIA_RETAIL_MARKUP = {
+    "GC=F": 1.045,
+    "PL=F": 1.04,
+    "PA=F": 1.04,
+}
+
+# Sanity bands for USD futures (reject bad Yahoo/API spikes)
+USD_SANITY = {
+    "GC=F": (2800, 5200),
+    "SI=F": (18, 120),
+    "PL=F": (800, 3500),
+    "PA=F": (800, 5000),
+    "HG=F": (2, 15),
+    "CL=F": (40, 200),
 }
 
 def convert(ticker: str, price_usd: float, usd_inr: float) -> dict:
@@ -36,7 +61,8 @@ def convert(ticker: str, price_usd: float, usd_inr: float) -> dict:
 
     if ticker in ("GC=F", "PL=F", "PA=F"):   # Gold, Platinum, Palladium ($/oz)
         duty      = DUTY["metals"]
-        per_gram  = round(p / OZ_TO_G * duty, 2)
+        retail    = INDIA_RETAIL_MARKUP.get(ticker, 1.0)
+        per_gram  = round(p / OZ_TO_G * duty * retail, 2)
         per_10g   = round(per_gram * 10, 2)
         per_oz    = round(p * duty, 2)
         out = {
@@ -169,6 +195,13 @@ def convert(ticker: str, price_usd: float, usd_inr: float) -> dict:
             "display_label": f"₹{fmt_inr(round(p,2))}",
             "also":          "",
         }
+
+    factor = INDIA_DISPLAY_FACTOR.get(ticker, 1.0)
+    if factor != 1.0 and out.get("display_price"):
+        dp = round(float(out["display_price"]) * factor, 2)
+        out["display_price"] = dp
+        unit = out.get("display_unit", "")
+        out["display_label"] = f"₹{fmt_inr(dp)} {unit}".strip()
 
     return out
 

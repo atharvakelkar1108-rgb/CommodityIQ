@@ -29,19 +29,26 @@ def run_fusion_pipeline(ohlcv: pd.DataFrame, daily_sentiment: pd.Series) -> Dict
     target = "target_next_logret"
     drop_y = {target}
     cols = [c for c in feat.columns if c not in drop_y and not str(c).startswith("target_")]
-    d = preprocess_features(feat).dropna(subset=cols + [target])
-    if len(d) < 50:
-        return {"ok": False, "error": "Insufficient aligned sentiment+price rows", "rows": len(d)}
+    all_rows = preprocess_features(feat, require_target=False)
+    train_rows = all_rows.dropna(subset=cols + [target])
+    if len(train_rows) < 50:
+        return {"ok": False, "error": "Insufficient aligned sentiment+price rows", "rows": len(train_rows)}
 
-    X = d[cols].values
-    y = d[target].values
+    X = train_rows[cols].values
+    y = train_rows[target].values
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     model = Ridge(alpha=1.0)
     model.fit(X_train, y_train)
     pred = model.predict(X_test)
-    last = d.iloc[-1]
+
+    infer_rows = all_rows.dropna(subset=cols)
+    if infer_rows.empty:
+        return {"ok": False, "error": "No row available for next-day inference"}
+    last = infer_rows.iloc[-1]
     nxt = float(model.predict(last[cols].values.reshape(1, -1))[0])
     last_close = float(last["close"])
+    as_of = infer_rows.index[-1]
+    as_of_str = str(as_of.date()) if hasattr(as_of, "date") else str(as_of)
 
     return {
         "ok": True,
@@ -55,6 +62,7 @@ def run_fusion_pipeline(ohlcv: pd.DataFrame, daily_sentiment: pd.Series) -> Dict
             if "sentiment" in cols and len(model.coef_) == len(cols)
             else None
         ),
+        "as_of_date": as_of_str,
         "predicted_next_log_return": nxt,
         "predicted_next_close_est": round(last_close * float(np.exp(nxt)), 4),
         "last_close": last_close,

@@ -22,7 +22,8 @@ def build_feature_matrix(ohlcv: pd.DataFrame) -> pd.DataFrame:
     # Skip indicator warmup (SMA50 / MACD) so ML rows are usable
     if len(ind) > 55:
         ind = ind.iloc[55:].copy()
-    required = [c for c in ("close", "RSI", "SMA_20", "log_ret_1", "target_next_logret") if c in ind.columns]
+    # Target is NaN on the latest bar (no future return yet); keep that row for inference.
+    required = [c for c in ("close", "RSI", "SMA_20", "log_ret_1") if c in ind.columns]
     if required:
         ind = ind.dropna(subset=required)
     return ind

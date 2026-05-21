@@ -5,7 +5,8 @@ import {
 } from 'recharts'
 import { Activity, RefreshCw, Cpu } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { fetchStockIndicators, fetchStockQuote, fetchStockPipeline } from '../api/client'
+import { fetchStockIndicators, fetchStockQuote, fetchStockPipeline, fetchFusionPredictionHistory } from '../api/client'
+import FusionModelPanel from './FusionModelPanel'
 
 /** API may send RSI/MACD keys; cards expect rsi/macd (series already uses lowercase). */
 function normalizeLatest(snap) {
@@ -54,6 +55,8 @@ export default function StocksIndicatorsPage() {
   const [loadError, setLoadError] = useState(null)
   const [pipeline, setPipeline] = useState(null)
   const [pipeLoading, setPipeLoading] = useState(false)
+  const [predHistory, setPredHistory] = useState(null)
+  const [fusionBundle, setFusionBundle] = useState(null)
 
   const load = useCallback(async () => {
     const sym = symbol.trim().toUpperCase()
@@ -87,6 +90,13 @@ export default function StocksIndicatorsPage() {
     try {
       const r = await fetchStockPipeline(sym)
       setPipeline(r.data)
+      setPredHistory(r.data?.prediction_history || null)
+      setFusionBundle({
+        fusion: r.data?.models?.sentiment_plus_price,
+        sentiment: r.data?.models?.sentiment,
+        prediction_history: r.data?.prediction_history,
+        ok: r.data?.models?.sentiment_plus_price?.ok,
+      })
       if (r.data?.ok === false) {
         toast.error(r.data.error || 'Pipeline could not complete — see details below')
       }
@@ -101,6 +111,14 @@ export default function StocksIndicatorsPage() {
   useEffect(() => {
     load()
   }, [load])
+
+  useEffect(() => {
+    const sym = symbol.trim().toUpperCase()
+    if (!sym) return
+    fetchFusionPredictionHistory(sym)
+      .then((r) => setPredHistory(r.data))
+      .catch(() => setPredHistory(null))
+  }, [symbol])
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -147,6 +165,16 @@ export default function StocksIndicatorsPage() {
         </div>
         <button type="button" onClick={load} className="tab-btn active" style={{ padding: '9px 18px' }}>Load</button>
       </div>
+
+      <FusionModelPanel
+        symbol={symbol}
+        fusionBundle={fusionBundle}
+        predHistory={predHistory}
+        onFusionUpdate={(data) => {
+          setFusionBundle(data)
+          setPredHistory(data?.prediction_history || null)
+        }}
+      />
 
       {quote && (
         <div className="card" style={{ marginBottom: '1rem', padding: '12px 16px', display: 'flex', gap: 24, flexWrap: 'wrap' }}>
@@ -246,6 +274,7 @@ export default function StocksIndicatorsPage() {
             <div style={{ fontSize: 13, marginBottom: 6 }}>
               <strong>Price model</strong> RMSE {pipeline.models.price_prediction.metrics?.rmse?.toFixed(5)} ·
               R² {pipeline.models.price_prediction.metrics?.r2?.toFixed(3)} ·
+              as of {pipeline.models.price_prediction.as_of_date} →
               next close est {pipeline.models.price_prediction.predicted_next_close_est}
             </div>
           ) : (
@@ -254,9 +283,8 @@ export default function StocksIndicatorsPage() {
             </div>
           )}
           {pipeline.models?.sentiment_plus_price?.ok ? (
-            <div style={{ fontSize: 13, marginBottom: 6 }}>
-              <strong>Sentiment + price</strong> RMSE {pipeline.models.sentiment_plus_price.metrics?.rmse?.toFixed(5)} ·
-              next close est {pipeline.models.sentiment_plus_price.predicted_next_close_est}
+            <div style={{ fontSize: 13, marginBottom: 6, color: 'var(--text-muted)' }}>
+              Fusion model updated — see panel above.
             </div>
           ) : (
             <div style={{ fontSize: 12, color: '#ef4444', marginBottom: 6 }}>

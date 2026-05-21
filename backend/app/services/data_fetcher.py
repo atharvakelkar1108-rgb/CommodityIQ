@@ -22,7 +22,7 @@ IMPORTANT: No hardcoded fallback prices. If all sources fail for a
 """
 
 import asyncio, requests, os
-from app.services.unit_converter import convert as unit_convert
+from app.services.unit_converter import convert as unit_convert, USD_SANITY, INDIA_RETAIL_MARKUP
 from app.services.price_display import usd_to_display
 from datetime import datetime
 from typing import Dict, Optional, Tuple
@@ -130,11 +130,11 @@ class DataFetcher:
                 r    = SESSION.get(url, timeout=6)
                 rate = float(extract(r.json()))
                 if 80 < rate < 110:          # sanity check
-                    print(f"[DataFetcher] USD/INR = ₹{rate:.4f} ({name})")
+                    print(f"[DataFetcher] USD/INR = {rate:.4f} ({name})")
                     return rate
             except Exception as e:
                 print(f"[DataFetcher] {name} failed: {e}")
-        print(f"[DataFetcher] All USD/INR sources failed, keeping ₹{self._usd_inr:.2f}")
+        print(f"[DataFetcher] All USD/INR sources failed, keeping INR {self._usd_inr:.2f}")
         return self._usd_inr
 
     # ── Gold-API.com (no key needed, metals only) ─────────────
@@ -163,17 +163,33 @@ class DataFetcher:
                     prev  = data.get("prev_close_price") or data.get("previousClose")
                     chg   = data.get("ch") or data.get("chp")   # % change field
                     if price and float(price) > 0:
+                        p = self._sanity_usd(ticker, float(price))
+                        if p is None:
+                            continue
                         prices[ticker] = {
-                            "price": float(price),
-                            "prev":  float(prev) if prev else float(price),
+                            "price": p,
+                            "prev":  self._sanity_usd(ticker, float(prev)) if prev else p,
                             "chp":   float(chg)  if chg  else None,
                         }
-                        print(f"[DataFetcher] gold-api: {symbol} = ${price:.2f} (prev=${prev})")
+                        print(f"[DataFetcher] gold-api: {symbol} = ${p:.2f} (prev={prev})")
             except Exception as e:
                 print(f"[DataFetcher] gold-api {symbol} failed: {e}")
         return prices
 
     # ── Yahoo Finance v8 ──────────────────────────────────────
+
+    def _sanity_usd(self, ticker: str, price_usd: Optional[float]) -> Optional[float]:
+        if price_usd is None:
+            return None
+        try:
+            v = float(price_usd)
+        except (TypeError, ValueError):
+            return None
+        band = USD_SANITY.get(ticker)
+        if band and not (band[0] <= v <= band[1]):
+            print(f"[DataFetcher] Reject {ticker} USD {v:.2f} (outside {band})")
+            return None
+        return v
 
     def _normalize_yahoo_price(self, ticker: str, price: Optional[float]) -> Optional[float]:
         if price is None:
@@ -181,6 +197,20 @@ class DataFetcher:
         val = float(price)
         scale = YAHOO_PRICE_SCALE.get(ticker, 1.0)
         return val * scale
+
+    def _last_sane_close_usd(self, ticker: str) -> Optional[float]:
+        """Last valid daily close from chart history (skips Yahoo spikes)."""
+        try:
+            df = self._fetch_history(ticker, "3mo", "1d")
+            if df is None or df.empty or "Close" not in df.columns:
+                return None
+            for v in reversed(df["Close"].astype(float).tolist()):
+                s = self._sanity_usd(ticker, v)
+                if s:
+                    return s
+        except Exception:
+            pass
+        return None
 
     def _fetch_yahoo(self, ticker: str) -> Tuple[Optional[float], Optional[float]]:
         """Returns (today_close, yesterday_close) or (None, None)."""
@@ -226,6 +256,18 @@ class DataFetcher:
         # Step 1: Try gold-api.com for all metals (fast, no key)
         metal_prices = self._fetch_gold_api()
 
+        metal_fx: Dict[str, float] = {}
+        try:
+            from app.services.scraper import get_metal_prices_free
+
+            raw_fx = get_metal_prices_free()
+            for key, tick in (("gold", "GC=F"), ("silver", "SI=F"), ("platinum", "PL=F")):
+                v = raw_fx.get(key)
+                if v and self._sanity_usd(tick, v):
+                    metal_fx[tick] = float(v)
+        except Exception as e:
+            print(f"[DataFetcher] metal FX fallback failed: {e}")
+
         live_count = 0
         for ticker, meta in COMMODITIES.items():
             price_usd = None
@@ -235,16 +277,24 @@ class DataFetcher:
             # Priority 1: gold-api for metals (includes prev price)
             if ticker in metal_prices:
                 md        = metal_prices[ticker]
-                price_usd = md["price"]
-                prev_usd  = md.get("prev", price_usd)
+                price_usd = self._sanity_usd(ticker, md["price"])
+                prev_usd  = self._sanity_usd(ticker, md.get("prev")) or price_usd
 
-            # Priority 2: Yahoo Finance (returns today, yesterday)
+            if price_usd is None and ticker in metal_fx:
+                price_usd = metal_fx[ticker]
+                prev_usd = price_usd
+
+            # Priority 3: Yahoo Finance (returns today, yesterday)
             if price_usd is None:
-                today, yesterday      = self._fetch_yahoo(ticker)
-                price_usd = today
-                prev_usd  = yesterday
+                today, yesterday = self._fetch_yahoo(ticker)
+                price_usd = self._sanity_usd(ticker, today)
+                prev_usd  = self._sanity_usd(ticker, yesterday) or price_usd
 
-            # Priority 3: Omkar Cloud (if API key set)
+            if price_usd is None:
+                price_usd = self._last_sane_close_usd(ticker)
+                prev_usd = price_usd
+
+            # Priority 4: Omkar Cloud (if API key set)
             if price_usd is None:
                 omkar_name = meta.get("omkar")
                 if omkar_name:
@@ -293,15 +343,46 @@ class DataFetcher:
             }
 
         self._using_fallback = live_count == 0
-        print(f"[DataFetcher] {live_count}/{len(COMMODITIES)} live · USD/INR=₹{rate:.2f}")
+        print(f"[DataFetcher] {live_count}/{len(COMMODITIES)} live · USD/INR={rate:.2f}")
 
-        # Gold sanity check
+        result = self._overlay_india_retail_prices(result)
+
         gold = result.get("GC=F")
         if gold:
-            gp = gold["price_inr"]
-            g10g = gold["price_usd"] * rate / 31.1035 * 10 * 1.09
-            print(f"[DataFetcher] Gold check: ${gold['price_usd']:.0f}/oz = ₹{gp:,.0f}/oz ≈ ₹{g10g:,.0f}/10g (MCX est.)")
+            g10g = gold.get("display_price")
+            print(
+                f"[DataFetcher] Gold display: {g10g}/10g "
+                f"(${gold.get('price_usd')}/oz, src={gold.get('display_source', 'intl')})"
+            )
 
+        return result
+
+    def _overlay_india_retail_prices(self, result: Dict[str, dict]) -> Dict[str, dict]:
+        """Prefer India retail units (24k/10g gold, silver/kg) from metal FX APIs."""
+        try:
+            from app.services.scraper import scrape_all
+
+            scraped = scrape_all(result, self._usd_inr)
+            indian = scraped.get("indian_prices") or {}
+            mapping = [
+                ("gold", "GC=F", "24k_per_10g", "per 10g"),
+                ("silver", "SI=F", "per_kg", "per kg"),
+                ("platinum", "PL=F", "per_10g", "per 10g"),
+            ]
+            for key, ticker, field, unit in mapping:
+                if key not in indian or ticker not in result:
+                    continue
+                row = indian[key]
+                dp = row.get(field)
+                if dp and float(dp) > 0:
+                    markup = INDIA_RETAIL_MARKUP.get(ticker, 1.0)
+                    result[ticker]["display_price"] = round(float(dp) * markup, 2)
+                    result[ticker]["display_unit"] = unit
+                    result[ticker]["display_source"] = "india_retail"
+                    if row.get("change_pct") is not None:
+                        result[ticker]["change_pct"] = float(row["change_pct"])
+        except Exception as e:
+            print(f"[DataFetcher] India retail overlay failed: {e}")
         return result
 
     # ── Historical data ───────────────────────────────────────
@@ -330,7 +411,7 @@ class DataFetcher:
                 for col in ["Open", "High", "Low", "Close"]:
                     if col in df.columns:
                         df[col] = df[col].astype(float) * scale
-            rate = self._usd_inr
+            rate = float(self._get_usd_inr())
             for col in ["Open", "High", "Low", "Close"]:
                 df[f"{col}_INR"] = (df[col].astype(float) * rate).round(2)
                 disp = []

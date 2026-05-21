@@ -17,6 +17,7 @@ from app.ml.features import build_feature_matrix
 from app.ml.stock_predictor import run_price_pipeline
 from app.ml.fusion_model import run_fusion_pipeline
 from app.ml.sentiment_model import analyze_text_fast
+from app.services.prediction_store import get_history, record_and_resolve
 from app.services.stock_data import fetch_ohlcv, fetch_quote, fetch_ticker_news
 from app.services.technical_indicators import compute_all, latest_snapshot
 
@@ -110,10 +111,52 @@ def _sentiment_series_for_index(index: pd.DatetimeIndex, news_scored: List[Dict[
     for i in index:
         key = pd.Timestamp(i).strftime("%Y-%m-%d")
         s.loc[i] = daily.get(key, float("nan"))
-    s = s.ffill().bfill()
-    if s.isna().all():
-        s[:] = 0.0
+    s = s.ffill()
+    s = s.fillna(0.0)
     return s.astype(float)
+
+
+def _run_fusion(symbol: str, period: str, *, persist: bool = True) -> Dict[str, Any]:
+    """Train fusion model (Ridge + sentiment) and optionally store vs next-day actuals."""
+    sym = symbol.strip().upper()
+    try:
+        df_raw = fetch_ohlcv(sym, period, "1d")
+    except Exception as exc:
+        return {"symbol": sym, "ok": False, "error": f"Could not fetch OHLCV: {exc}"}
+
+    df = preprocess_ohlcv(df_raw)
+    if len(df) < 40:
+        return {
+            "symbol": sym,
+            "ok": False,
+            "error": f"Not enough rows after preprocessing ({len(df)})",
+            "rows_out": len(df),
+        }
+
+    feat = build_feature_matrix(df)
+    news = _news_with_sentiment(sym, 15)
+    sent_series = _sentiment_series_for_index(feat.index, news)
+
+    try:
+        fusion_out = run_fusion_pipeline(df, sent_series)
+    except Exception as exc:
+        fusion_out = {"ok": False, "error": str(exc)}
+
+    prediction_history = get_history(sym)
+    if fusion_out.get("ok") and persist:
+        try:
+            prediction_history = record_and_resolve(sym, fusion_out, df)
+        except Exception as exc:
+            prediction_history = {**prediction_history, "error": str(exc)}
+
+    return {
+        "symbol": sym,
+        "ok": fusion_out.get("ok", False),
+        "fusion": fusion_out,
+        "sentiment": {"headlines_analyzed": len(news), "articles": news},
+        "prediction_history": prediction_history,
+        "error": fusion_out.get("error"),
+    }
 
 
 def _run_full_pipeline(symbol: str, period: str) -> Dict[str, Any]:
@@ -148,6 +191,13 @@ def _run_full_pipeline(symbol: str, period: str) -> Dict[str, Any]:
     except Exception as exc:
         fusion_out = {"ok": False, "error": str(exc)}
 
+    prediction_history = {"symbol": sym, "predictions": [], "forward_metrics": {}}
+    if fusion_out.get("ok"):
+        try:
+            prediction_history = record_and_resolve(sym, fusion_out, df)
+        except Exception as exc:
+            prediction_history = {"symbol": sym, "error": str(exc), "predictions": []}
+
     return {
         "symbol": sym,
         "ok": True,
@@ -169,6 +219,7 @@ def _run_full_pipeline(symbol: str, period: str) -> Dict[str, Any]:
             },
             "sentiment_plus_price": fusion_out,
         },
+        "prediction_history": prediction_history,
     }
 
 
@@ -277,6 +328,26 @@ async def stock_backtest(symbol: str, body: BacktestBody):
     if not res.get("ok"):
         raise HTTPException(400, detail=res.get("error", "backtest failed"))
     return {"symbol": sym, **res}
+
+
+@router.get("/{symbol}/predictions/history")
+async def fusion_prediction_history(symbol: str, limit: int = Query(30, ge=1, le=100)):
+    """Stored fusion forecasts vs realized next-day closes (when available)."""
+    sym = symbol.strip().upper()
+    return await _run_sync(get_history, sym, limit)
+
+
+@router.get("/{symbol}/fusion")
+async def stock_fusion(symbol: str, period: str = Query("1y")):
+    """
+    Fusion model only: Ridge on technical features + news sentiment.
+    Persists forecast and resolves prior rows against next-session actuals.
+    """
+    sym = symbol.strip().upper()
+    out = await _run_sync(_run_fusion, sym, period, persist=True)
+    if not out.get("ok") and out.get("error"):
+        return out
+    return out
 
 
 @router.get("/{symbol}/pipeline")

@@ -8,11 +8,15 @@ POST /api/predictions/{ticker}/train  → trigger model (re)training
 GET  /api/predictions/models/status   → list trained models + RMSE
 """
 
+from datetime import date
+
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from typing import Optional
 
 from app.services.data_fetcher import COMMODITIES, PREDICTION_EXCLUDED, prediction_tickers
 from app.services.predictor import LSTMPredictor
+from app.services.commodity_today_service import predict_all_today, predict_today_one
+from app.ml.commodity_today import predict_today_sklearn
 from app.routes.prices import fetcher
 
 router = APIRouter()
@@ -59,6 +63,25 @@ async def model_ready(ticker: str):
     return {"ticker": ticker, "model_ready": _predictor.has_trained_model(ticker)}
 
 
+@router.get("/today")
+async def predict_today_all(refresh: bool = Query(False, description="Bypass 45m cache")):
+    """
+    Today's predicted close for all commodities (INR display units).
+    Uses saved LSTM when available; otherwise trains a lightweight technical model on the fly.
+    """
+    return await predict_all_today(fetcher, _predictor, use_cache=not refresh)
+
+
+@router.get("/{ticker}/today")
+async def predict_today_single(ticker: str):
+    """Today's predicted close for one commodity."""
+    ticker = _validate_prediction_ticker(ticker)
+    result = await predict_today_one(ticker, fetcher, _predictor)
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=result.get("error", "Prediction failed"))
+    return result
+
+
 @router.get("/{ticker}")
 async def predict(
     ticker: str,
@@ -72,6 +95,23 @@ async def predict(
     if "error" in result:
         raise HTTPException(status_code=503, detail=result["error"])
 
+    # Attach sklearn today forecast when LSTM missing or as cross-check for day 1
+    if days >= 1:
+        await fetcher.refresh_all_prices()
+        hist = await fetcher.get_historical(ticker, period="1y", interval="1d")
+        sk = predict_today_sklearn(ticker, hist, fetcher)
+        if sk.get("ok"):
+            result["today_prediction"] = {
+                "date": sk["prediction_date"],
+                "price_display_inr": sk["predicted_price_display"],
+                "change_pct_display": sk["change_pct"],
+                "model": sk["model"],
+                "last_price_display_inr": sk["last_price_display"],
+            }
+        elif result.get("forecast"):
+            result["today_prediction"] = result["forecast"][0]
+
+    result["prediction_date"] = date.today().isoformat()
     return result
 
 

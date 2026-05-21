@@ -107,14 +107,21 @@ class LSTMPredictor:
         last_date  = df.index[-1]
         rate       = float(self.fetcher._usd_inr)
         disp_last, disp_unit = self._live_display_baseline(ticker, last_price, rate)
+        forecast_dates = self._forecast_dates(last_date, forecast_days)
 
         forecast = []
         for i, price in enumerate(preds_inr):
-            date   = pd.Timestamp(last_date) + pd.Timedelta(days=i+1)
-            p_disp = float(price)
+            fdate = forecast_dates[i] if i < len(forecast_dates) else (
+                pd.Timestamp(last_date).normalize() + pd.Timedelta(days=i + 1)
+            )
+            p_model = float(price)
+            if disp_last > 0 and last_price > 0:
+                p_disp = disp_last * (p_model / last_price)
+            else:
+                p_disp = p_model
             change_d = round((p_disp - disp_last) / disp_last * 100, 2) if disp_last else 0.0
             forecast.append({
-                "date":               date.strftime("%Y-%m-%d"),
+                "date":               fdate.strftime("%Y-%m-%d"),
                 "price_inr":          round(p_disp, 2),
                 "price_display_inr":  round(p_disp, 2),
                 "change_pct":         change_d,
@@ -124,12 +131,15 @@ class LSTMPredictor:
         vol        = float(np.std(feat[-30:, 0]) / np.mean(feat[-30:, 0])) * 100
         confidence = max(10, min(95, round(100 - vol * 2, 1)))
 
+        today_fc = forecast[0] if forecast else None
         return {
             "ticker":                  ticker,
             "forecast":                forecast,
+            "today_prediction":        today_fc,
             "confidence":              confidence,
             "last_price_inr":          round(disp_last, 2),
             "last_price_display_inr":  round(disp_last, 2),
+            "last_bar_date":           pd.Timestamp(last_date).strftime("%Y-%m-%d"),
             "display_unit":            disp_unit or COMMODITIES.get(ticker, {}).get("unit", ""),
             "model_type":              "2D Multivariate LSTM (7 features)",
             "features_used":           FEATURE_COLS,
@@ -153,6 +163,18 @@ class LSTMPredictor:
         return results
 
     # ── Internal helpers ──────────────────────────────────────
+
+    @staticmethod
+    def _forecast_dates(last_date, n_steps: int) -> list:
+        """First forecast = today when last bar is before today; else next business day."""
+        last = pd.Timestamp(last_date).normalize()
+        today = pd.Timestamp.now().normalize()
+        cursor = today if last < today else last + pd.offsets.BDay(1)
+        dates = []
+        for _ in range(n_steps):
+            dates.append(cursor)
+            cursor = cursor + pd.offsets.BDay(1)
+        return dates
 
     def _live_display_baseline(self, ticker: str, hist_last: float, rate: float):
         """Use live dashboard display_price when available so forecast base matches the table."""

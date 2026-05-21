@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { fetchPrediction, trainModel, fetchModelReady } from '../api/client'
+import { fetchPrediction, fetchTodayPrediction, trainModel, fetchModelReady } from '../api/client'
 import { Brain, Loader, TrendingUp, TrendingDown } from 'lucide-react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 import toast from 'react-hot-toast'
@@ -39,6 +39,7 @@ const CustomTooltip = ({ active, payload }) => {
 export default function PredictPage({ wsData }) {
   const [ticker,   setTicker]   = useState('GC=F')
   const [days,     setDays]     = useState(7)
+  const [todayPred, setTodayPred] = useState(null)
   const [result,   setResult]   = useState(null)
   const [loading,  setLoading]  = useState(false)
   const [training, setTraining] = useState(false)
@@ -48,6 +49,10 @@ export default function PredictPage({ wsData }) {
     fetchModelReady(ticker)
       .then((r) => setModelReady(!!r.data.model_ready))
       .catch(() => setModelReady(false))
+    setTodayPred(null)
+    fetchTodayPrediction(ticker)
+      .then((r) => setTodayPred(r.data))
+      .catch(() => setTodayPred(null))
   }, [ticker])
 
   const handlePredict = async () => {
@@ -55,6 +60,17 @@ export default function PredictPage({ wsData }) {
     try {
       const r = await fetchPrediction(ticker, days)
       setResult(r.data)
+      if (r.data?.today_prediction) {
+        const tp = r.data.today_prediction
+        setTodayPred({
+          ok: true,
+          ticker,
+          predicted_price_display: tp.price_display_inr,
+          change_pct: tp.change_pct_display ?? tp.change_pct,
+          prediction_date: tp.date || r.data.prediction_date,
+          model: r.data.model_type,
+        })
+      }
     } catch (e) {
       toast.error(e.response?.data?.detail || 'Prediction failed. Train the model once, then Predict is instant.')
     }
@@ -89,9 +105,9 @@ export default function PredictPage({ wsData }) {
   return (
     <div>
       <div style={{ marginBottom:'1.5rem' }}>
-        <h1 style={{ fontSize:22, fontWeight:700, color:'#e2e8f0' }}>LSTM Price Predictions</h1>
+        <h1 style={{ fontSize:22, fontWeight:700, color:'#e2e8f0' }}>Commodity Price Predictions</h1>
         <p style={{ fontSize:13, color:'#64748b', marginTop:2 }}>
-          Train each commodity once · Predict reuses the saved model (seconds, not minutes)
+          Today&apos;s close forecast (auto) · Multi-day LSTM after one-time train
           {modelReady ? (
             <span style={{ color:'#22c55e', marginLeft:8 }}>✓ model saved for {ticker}</span>
           ) : (
@@ -99,6 +115,43 @@ export default function PredictPage({ wsData }) {
           )}
         </p>
       </div>
+
+      {todayPred?.ok && (
+        <div className="card" style={{
+          marginBottom:'1.5rem', padding:'14px 18px',
+          borderLeft:'4px solid #6366f1',
+          display:'flex', flexWrap:'wrap', gap:20, alignItems:'center',
+        }}>
+          <div>
+            <div style={{ fontSize:11, color:'#64748b', textTransform:'uppercase' }}>Today&apos;s predicted close</div>
+            <div style={{ fontSize:26, fontWeight:800, color:'#e2e8f0', marginTop:4 }}>
+              {fmt(todayPred.predicted_price_display)}
+              <span style={{ fontSize:13, color:'#64748b', marginLeft:8, fontWeight:500 }}>
+                {todayPred.display_unit || liveUnit}
+              </span>
+            </div>
+            <div style={{ fontSize:12, color:'#64748b', marginTop:4 }}>
+              {TICKERS.find(t => t.ticker === ticker)?.name} · {todayPred.prediction_date}
+              {todayPred.model && <span> · {todayPred.model}</span>}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize:11, color:'#64748b' }}>vs last close</div>
+            <div style={{
+              fontSize:18, fontWeight:700,
+              color: (todayPred.change_pct ?? 0) >= 0 ? '#22c55e' : '#ef4444',
+            }}>
+              {(todayPred.change_pct ?? 0) >= 0 ? '+' : ''}{Number(todayPred.change_pct ?? 0).toFixed(2)}%
+            </div>
+          </div>
+          {livePrice != null && (
+            <div>
+              <div style={{ fontSize:11, color:'#64748b' }}>Live now</div>
+              <div style={{ fontSize:16, fontWeight:600, color:'#94a3b8' }}>{fmt(livePrice)}</div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="card" style={{ marginBottom:'1.5rem' }}>
         <div style={{ display:'flex', gap:12, flexWrap:'wrap', alignItems:'flex-end' }}>
@@ -111,7 +164,9 @@ export default function PredictPage({ wsData }) {
           <div style={{ minWidth:130 }}>
             <label style={{ fontSize:11, color:'#64748b', display:'block', marginBottom:6 }}>FORECAST DAYS</label>
             <select value={days} onChange={e => setDays(Number(e.target.value))} style={{ width:'100%' }}>
-              {[3,5,7,10,14,21,30].map(d => <option key={d} value={d}>{d} days</option>)}
+              {[1,3,5,7,10,14,21,30].map(d => (
+                <option key={d} value={d}>{d === 1 ? '1 day (today)' : `${d} days`}</option>
+              ))}
             </select>
           </div>
           <button onClick={handlePredict} disabled={loading}

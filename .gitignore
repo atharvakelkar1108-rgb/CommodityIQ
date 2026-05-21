@@ -45,6 +45,9 @@ yarn-error.log*
 Thumbs.db
 desktop.ini
 
+# ── Local prediction history DB ─────────────────────────────
+backend/data/
+
 # ── Logs & temp ─────────────────────────────────────────────
 *.log
 logs/

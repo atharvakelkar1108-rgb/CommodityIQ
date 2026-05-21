@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { fetchAllPrices } from '../api/client'
+import { fetchAllPrices, fetchAllTodayPredictions } from '../api/client'
 import { Search, TrendingUp, TrendingDown } from 'lucide-react'
 import PriceChart from './PriceChart'
 import toast from 'react-hot-toast'
@@ -34,10 +34,26 @@ export default function Dashboard({ wsData }) {
   const [search,   setSearch]   = useState('')
   const [sortBy,   setSortBy]   = useState('name')
   const [selected, setSelected] = useState(null)
+  const [todayPreds, setTodayPreds] = useState({})
+  const [todayLoading, setTodayLoading] = useState(false)
+
+  const loadForecasts = () => {
+    setTodayLoading(true)
+    return fetchAllTodayPredictions(true)
+      .then((r) => {
+        const map = {}
+        for (const p of r.data?.predictions || []) {
+          if (p.ticker) map[p.ticker] = p
+        }
+        setTodayPreds(map)
+      })
+      .catch(() => setTodayPreds({}))
+      .finally(() => setTodayLoading(false))
+  }
 
   useEffect(() => {
     fetchAllPrices()
-      .then(r => { setRest(r.data.data || []); setLoading(false) })
+      .then(r => { setRest(r.data.data || []); setLoading(false); return loadForecasts() })
       .catch(() => { toast.error('Failed to load prices'); setLoading(false) })
   }, [])
 
@@ -68,10 +84,23 @@ export default function Dashboard({ wsData }) {
         <div>
           <h1 style={{fontSize:22,fontWeight:700,color:'var(--text-primary)'}}>Market Dashboard</h1>
           <p style={{fontSize:13,color:'var(--text-muted)',marginTop:2}}>
-            Prices in Indian units · Live prices from Yahoo Finance &amp; gold-api.com
+            Live prices · Today&apos;s ML forecast per commodity
+            {todayLoading ? ' (loading forecasts…)' : Object.keys(todayPreds).length ? '' : ''}
           </p>
         </div>
-        <div style={{display:'flex',alignItems:'center',gap:8}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+          <button
+            type="button"
+            onClick={loadForecasts}
+            disabled={todayLoading}
+            style={{
+              padding:'6px 12px', fontSize:12, borderRadius:8, cursor:'pointer',
+              background:'rgba(99,102,241,0.15)', color:'#a5b4fc',
+              border:'1px solid rgba(99,102,241,0.35)',
+            }}
+          >
+            {todayLoading ? 'Updating forecasts…' : 'Refresh forecasts'}
+          </button>
           <span className="live-dot"/>
           <span style={{fontSize:12,color:'#22c55e',fontWeight:500}}>
             {wsData.connected ? 'Live' : 'Offline'}
@@ -181,7 +210,7 @@ export default function Dashboard({ wsData }) {
           <table style={{width:'100%',borderCollapse:'collapse'}}>
             <thead>
               <tr style={{borderBottom:'1px solid var(--border)'}}>
-                {['Commodity','Category','Price','Unit','Change % (today)','Also / Intl ref.','Confidence'].map(h => (
+                {['Commodity','Category','Price','Today forecast','Unit','Change %','Also / Intl ref.'].map(h => (
                   <th key={h} style={{padding:'11px 14px',textAlign:'left',fontSize:11,
                     color:'var(--text-muted)',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.04em'}}>{h}</th>
                 ))}
@@ -193,8 +222,9 @@ export default function Dashboard({ wsData }) {
                 const zero  = !c.change_pct || c.change_pct === 0
                 const dispP = getDisplayPrice(c)
                 const dispU = getDisplayUnit(c)
-                const pred  = Math.min(95, Math.max(30, 60 + (c.change_pct||0)*3))
-                const pc    = pred > 65 ? '#22c55e' : pred > 45 ? '#f59e0b' : '#ef4444'
+                const tp = todayPreds[c.ticker]
+                const fchg = tp?.change_pct
+                const fup = fchg != null && fchg >= 0
                 return (
                   <tr key={c.ticker||i} onClick={() => setSelected(c)}
                     style={{borderBottom:'1px solid var(--bg-hover)',cursor:'pointer'}}
@@ -220,6 +250,27 @@ export default function Dashboard({ wsData }) {
                       <div style={{fontWeight:700,fontSize:14,color:'var(--text-primary)'}}>{fmtInr(dispP)}</div>
                     </td>
 
+                    <td style={{padding:'11px 14px'}}>
+                      {tp?.ok ? (
+                        <>
+                          <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>
+                            {fmtInr(tp.predicted_price_display)}
+                          </div>
+                          <div style={{
+                            fontSize: 11,
+                            marginTop: 2,
+                            color: fup ? '#22c55e' : '#ef4444',
+                          }}>
+                            {fup ? '▲' : '▼'} {Math.abs(fchg ?? 0).toFixed(2)}% est.
+                          </div>
+                        </>
+                      ) : todayLoading ? (
+                        <span style={{ fontSize: 11, color: 'var(--text-hint)' }}>…</span>
+                      ) : (
+                        <span style={{ fontSize: 11, color: 'var(--text-hint)' }}>—</span>
+                      )}
+                    </td>
+
                     <td style={{padding:'11px 14px',fontSize:11,color:'var(--text-muted)'}}>
                       {dispU}
                     </td>
@@ -236,13 +287,6 @@ export default function Dashboard({ wsData }) {
 
                     <td style={{padding:'11px 14px',fontSize:11,color:'var(--text-hint)',maxWidth:170}}>
                       {c.also || ''}
-                    </td>
-
-                    <td style={{padding:'11px 14px',minWidth:110}}>
-                      <div style={{fontSize:11,color:pc,marginBottom:4}}>{pred.toFixed(0)}%</div>
-                      <div className="prediction-bar">
-                        <div style={{width:pred+'%',background:pc,height:'100%',borderRadius:2}}/>
-                      </div>
                     </td>
 
                   </tr>

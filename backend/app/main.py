@@ -10,6 +10,7 @@ from app.routes import prices, predictions, alerts, scraper, export, stocks, sen
 from app.routes.prices import fetcher
 from app.core.websocket_manager import ConnectionManager
 from app.ml.sentiment_model import preload_finbert
+from app.services.prediction_store import init_db
 
 manager = ConnectionManager()
 scheduler = AsyncIOScheduler()
@@ -18,6 +19,7 @@ scheduler = AsyncIOScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("[App] Starting up — fetching initial prices...")
+    init_db()
     await fetcher.refresh_all_prices()
 
     # Preload FinBERT in background so Sentiment tab is ready without cold-start delay

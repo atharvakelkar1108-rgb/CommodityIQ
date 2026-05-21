@@ -75,11 +75,11 @@ def predict_next_logret(model: HistGradientBoostingRegressor, feat_row: pd.Serie
 
 
 def run_price_pipeline(ohlcv: pd.DataFrame) -> Dict[str, Any]:
-    """End-to-end: feature engineering → train → next-day prediction on last bar."""
+    """End-to-end: feature engineering → train → next-day prediction on latest bar."""
     feat = build_feature_matrix(ohlcv)
-    feat = preprocess_features(feat)
-    cols = _feature_columns(feat)
-    trainable = feat.dropna(subset=cols + [TARGET])
+    feat_all = preprocess_features(feat, require_target=False)
+    cols = _feature_columns(feat_all)
+    trainable = feat_all.dropna(subset=cols + [TARGET])
     if len(trainable) < MIN_TRAIN_ROWS:
         return {
             "ok": False,
@@ -88,11 +88,15 @@ def run_price_pipeline(ohlcv: pd.DataFrame) -> Dict[str, Any]:
         }
 
     model, tr = train_price_model(trainable)
-    infer_df = feat.dropna(subset=cols)
+    infer_df = feat_all.dropna(subset=cols)
+    if infer_df.empty:
+        return {"ok": False, "error": "No row available for next-day inference"}
     last = infer_df.iloc[-1]
     nxt = predict_next_logret(model, last, cols)
     last_close = float(last["close"])
     implied_next = last_close * float(np.exp(nxt))
+    as_of = infer_df.index[-1]
+    as_of_str = str(as_of.date()) if hasattr(as_of, "date") else str(as_of)
 
     return {
         "ok": True,
@@ -102,7 +106,8 @@ def run_price_pipeline(ohlcv: pd.DataFrame) -> Dict[str, Any]:
         "n_train": tr.n_train,
         "n_test": tr.n_test,
         "top_features": tr.feature_importance[:12],
-        "last_bar_date": str(feat.index[-1].date()) if hasattr(feat.index[-1], "date") else str(feat.index[-1]),
+        "as_of_date": as_of_str,
+        "last_bar_date": as_of_str,
         "last_close": last_close,
         "predicted_next_log_return": nxt,
         "predicted_next_close_est": round(implied_next, 4),

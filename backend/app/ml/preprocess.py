@@ -20,12 +20,13 @@ def preprocess_ohlcv(df: pd.DataFrame, max_ffill: int = 5) -> pd.DataFrame:
     return d
 
 
-def preprocess_features(feature_df: pd.DataFrame) -> pd.DataFrame:
-    """Drop all-NaN columns, inf -> nan, drop rows that are still invalid."""
+def preprocess_features(feature_df: pd.DataFrame, *, require_target: bool = True) -> pd.DataFrame:
+    """Drop all-NaN columns, inf -> nan. Optionally drop rows missing target (training only)."""
     if feature_df.empty:
         return feature_df
     d = feature_df.replace([float("inf"), float("-inf")], pd.NA).dropna(how="all")
-    target_cols = [c for c in d.columns if c.startswith("target_")]
-    if target_cols:
-        d = d.dropna(subset=target_cols)
+    if require_target:
+        target_cols = [c for c in d.columns if c.startswith("target_")]
+        if target_cols:
+            d = d.dropna(subset=target_cols)
     return d

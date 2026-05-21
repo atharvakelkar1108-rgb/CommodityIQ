@@ -1,6 +1,6 @@
 # CommodityIQ — Market Intelligence Platform
 
-Full-stack web application for **commodity and equity market intelligence**: live prices (INR), LSTM forecasts, technical analysis, FinBERT sentiment, ML pipelines, backtesting, alerts, and portfolio tools.
+Full-stack web application for **commodity and equity market intelligence**: live prices (INR), **today’s commodity forecasts** (dashboard), LSTM multi-day forecasts, stock technical analysis, **fusion model** (sentiment + price) with stored forward validation, FinBERT sentiment, ML pipelines, backtesting, alerts, and portfolio tools.
 
 **Team:** 5-member student project  
 **Stack:** React (Vite) + FastAPI + TensorFlow + scikit-learn + FinBERT (Hugging Face)
@@ -39,8 +39,9 @@ Full-stack web application for **commodity and equity market intelligence**: liv
 │  │ prices      │ │ data_fetcher │ │ features, preprocess     │  │
 │  │ predictions │ │ predictor    │ │ stock_predictor (HGBR)   │  │
 │  │ stocks      │ │ stock_data   │ │ fusion_model (Ridge)     │  │
-│  │ sentiment   │ │ technical_*  │ │ sentiment_model (FinBERT)│  │
-│  │ alerts      │ │ unit_convert │ │ backtest                 │  │
+│  │ sentiment   │ │ prediction_  │ │ commodity_today (spot)   │  │
+│  │ alerts      │ │ store, tech_*│ │ sentiment_model, backtest│  │
+│  │             │ │ unit_convert │ │                          │  │
 │  └─────────────┘ └──────────────┘ └──────────────────────────┘  │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
@@ -53,10 +54,17 @@ Full-stack web application for **commodity and equity market intelligence**: liv
 **Data flow (Stocks & TA → ML pipeline):**
 
 1. Fetch OHLCV via `yfinance` → `preprocess_ohlcv` (sort, ffill gaps, valid close).
-2. `build_feature_matrix` → RSI, MACD, Bollinger, SMA, log returns, target = next-day log return.
-3. **Price model:** `HistGradientBoostingRegressor` predicts `target_next_logret`; implied next close = `close × exp(pred)`.
-4. **Fusion model:** `Ridge` adds daily sentiment feature from news headlines.
-5. **Sentiment tab:** Loads headlines, then scores via `POST /api/sentiment/analyze` with FinBERT; keyword fallback only if model unavailable.
+2. `build_feature_matrix` → RSI, MACD, Bollinger, SMA, log returns; **latest bar kept for inference** (target NaN on last row is OK).
+3. **Price model:** `HistGradientBoostingRegressor` predicts `target_next_logret` from the **latest** feature row; implied next close = `close × exp(pred)`.
+4. **Fusion model:** `Ridge` on technicals + daily sentiment (news via fast keyword scorer in pipeline; no `bfill` on sentiment).
+5. **Fusion persistence:** Each successful pipeline run saves the forecast to `backend/data/fusion_predictions.db` and resolves prior rows when the next session’s close is available.
+6. **Sentiment tab:** `POST /api/sentiment/analyze` with FinBERT; keyword fallback if model unavailable.
+
+**Data flow (Dashboard → today’s commodity forecast):**
+
+1. `refresh_all_prices()` → live `display_price` in Indian units (₹/10g gold, ₹/kg silver, etc.) with **India retail markup** where applicable.
+2. `GET /api/predictions/today?refresh=true` → per ticker: align last OHLCV bar to live price, apply **near-spot** forecast (live + capped 5-day momentum, ±1.8% max daily move).
+3. Dashboard **Today forecast** column and Predictions page **Today’s predicted close** banner show the same API output.
 
 ---
 
@@ -71,8 +79,9 @@ commodity-predictor-atharva/
 │   ├── app/
 │   │   ├── main.py           ← FastAPI app, WebSocket, scheduler
 │   │   ├── routes/           ← API endpoints
-│   │   ├── services/         ← Data fetch, LSTM, indicators
-│   │   └── ml/               ← Stock ML + sentiment + backtest
+│   │   ├── services/         ← Data fetch, LSTM, indicators, prediction_store
+│   │   └── ml/               ← Stock ML, fusion, commodity_today, backtest
+│   ├── data/                 ← fusion_predictions.db (local, gitignored)
 │   ├── requirements.txt
 │   ├── requirements-ml.txt   ← transformers, torch (FinBERT)
 │   ├── .cache/huggingface/   ← FinBERT weights (persist after first download)
@@ -81,7 +90,7 @@ commodity-predictor-atharva/
 │   ├── src/
 │   │   ├── App.jsx           ← Routing + navigation
 │   │   ├── api/client.js     ← Axios API client
-│   │   └── components/       ← Page components
+│   │   └── components/       ← Pages incl. FusionModelPanel.jsx
 │   └── package.json
 └── _project_archive/         ← Old dev/fix scripts (not needed to run)
 ```
@@ -92,25 +101,39 @@ commodity-predictor-atharva/
 
 | Model | Library | Used for | Input | Output |
 |-------|---------|----------|-------|--------|
-| **2D LSTM** | TensorFlow/Keras | Commodity price forecast (Predictions tab) | 60-day window × 7 features (OHLCV, return, USD/INR) | Next 7 days Close (INR) |
-| **HistGradientBoostingRegressor** | scikit-learn | Stock next-day log return (ML pipeline) | Technical + return features (~17 cols) | `target_next_logret` → implied next close |
-| **Ridge regression** | scikit-learn | Sentiment + price fusion | Features + daily sentiment score | Next log return / close estimate |
+| **2D LSTM** | TensorFlow/Keras | Multi-day commodity forecast (Predictions tab) | 60-day window × 7 features (OHLCV, return, USD/INR) | Next N days Close (display units); optional if trained |
+| **Near-spot + momentum** | pandas + rules | **Today’s commodity forecast** (Dashboard, `/predictions/today`) | Live `display_price` + last 5 daily returns | Today’s close est. within ±1.8% of live |
+| **HistGradientBoostingRegressor** | scikit-learn | Stock / commodity technical next-day return | Technical + return features (~17 cols) | `target_next_logret` → implied next close |
+| **Ridge regression** | scikit-learn | Sentiment + price fusion (Stocks) | Features + daily sentiment (ffill + 0, no bfill) | Next log return / close from **latest** bar |
 | **FinBERT** | Hugging Face `ProsusAI/finbert` | Financial sentiment (Sentiment tab) | Text (headline / custom) | positive / negative / neutral + score |
-| **Keyword fallback** | Regex rules | Fast news headlines / no GPU | Text | Label + score ∈ [-1, 1] |
+| **Keyword fallback** | Regex rules | Fusion pipeline news headlines / no GPU | Text | Label + score ∈ [-1, 1] |
 
-### LSTM (commodities)
+### LSTM (commodities — multi-day)
 
 - **File:** `backend/app/services/predictor.py`
 - **Architecture:** `Input(60,7) → LSTM(128) → Dropout → LSTM(64) → Dropout → Dense(32) → Dense(1)`
 - **Training:** Per-ticker; models saved under `backend/app/models/trained/`
 - **Scaler:** `MinMaxScaler` on 7 features per timestep
+- **Live anchoring:** Forecast levels scaled to dashboard `display_price`; first forecast date aligned to **today** when the last history bar is before today
+- **Today slice:** Response includes `today_prediction` (first forecast day)
 
-### Stock ML pipeline
+### Today’s commodity forecast (Dashboard)
+
+- **Files:** `backend/app/ml/commodity_today.py`, `backend/app/services/commodity_today_service.py`
+- **No training required** — runs on every `GET /api/predictions/today` (cached ~10 min; use `?refresh=true` to bypass)
+- **Baseline:** Live `display_price` from `data_fetcher` (same as price table)
+- **Formula:** `forecast = live × (1 + capped_mean_5d_return)` with daily move capped at ±1.8%; light blend (20%) with technical ML when available
+- **Why:** Raw ML on stale Yahoo history produced ~₹1.33L gold when live/MCX is ~₹1.58–1.60L/10g; near-spot keeps dashboard forecasts aligned with Indian display units
+
+### Stock ML pipeline & fusion
 
 - **Files:** `backend/app/ml/features.py`, `stock_predictor.py`, `fusion_model.py`, `preprocess.py`
 - **Target:** \( y_t = \ln(C_{t+1}/C_t) \) (`target_next_logret`)
-- **Next close estimate:** \( \hat{C}_{t+1} = C_t \cdot e^{\hat{y}_t} \)
-- **Metrics:** RMSE, R² on held-out time-ordered test split (no shuffle)
+- **Inference:** Latest OHLCV bar is **not** dropped for missing target; `preprocess_features(..., require_target=False)` for the last row
+- **Next close estimate:** \( \hat{C}_{t+1} = C_{live} \cdot e^{\hat{y}} \) when live price is available
+- **Fusion storage:** `backend/app/services/prediction_store.py` → SQLite `backend/data/fusion_predictions.db`
+- **Forward validation:** On each pipeline/fusion run, unresolved rows get `actual_close` from the next trading session in OHLCV; API returns MAE / MAPE on resolved rows
+- **Metrics:** RMSE, R² on held-out time-ordered test split (log return; no shuffle)
 
 ### FinBERT sentiment
 
@@ -127,11 +150,11 @@ commodity-predictor-atharva/
 
 | Route | Component | Description |
 |-------|-----------|-------------|
-| `/` | Dashboard | Live commodity prices (INR), WebSocket updates |
+| `/` | Dashboard | Live commodity prices (INR), **Today forecast** column, WebSocket, **Refresh forecasts** |
 | `/portfolio` | PortfolioPage | Holdings tracking |
 | `/heatmap` | HeatmapPage | Category performance heatmap |
 | `/mcx` | MCXPage | MCX India–focused view |
-| `/predict` | PredictPage | LSTM train/predict per commodity |
+| `/predict` | PredictPage | **Today’s predicted close** + LSTM train/predict (1–30 days) |
 | `/target` | PriceTargetPage | Price target analysis |
 | `/compare` | ComparePage | Multi-asset comparison |
 | `/seasonal` | SeasonalPage | Seasonal patterns |
@@ -139,7 +162,7 @@ commodity-predictor-atharva/
 | `/scraper` | ScraperPage | Web scraper utilities |
 | `/export` | ExportPage | CSV/Excel export |
 | `/news` | NewsPage | Market news |
-| `/stocks` | StocksIndicatorsPage | Stock OHLCV, indicators, **ML pipeline**, charts |
+| `/stocks` | StocksIndicatorsPage | Stock OHLCV, indicators, **Fusion model panel**, full **ML pipeline**, forecast vs actual table |
 | `/sentiment` | SentimentQuantPage | FinBERT custom text + ticker news |
 | `/backtest` | BacktestQuantPage | RSI mean-reversion / buy & hold |
 | `/calendar` | MarketCalendarPage | MCX calendar |
@@ -161,6 +184,12 @@ commodity-predictor-atharva/
 
 No hardcoded commodity prices: if all sources fail, ticker shows as unavailable.
 
+**Price quality (commodities):**
+
+- Metals use **USD sanity bands** (e.g. gold ~$2800–5200/oz) to reject bad ticks
+- **India retail markup** (~4.5% on gold/platinum display) aligns ₹/10g with portal-style quotes
+- **India retail overlay** via `scraper.py` for gold/silver/platinum display units after live fetch
+
 ---
 
 ## REST API reference
@@ -170,8 +199,8 @@ Base URL: `http://localhost:8000`
 | Prefix | Endpoints (summary) |
 |--------|---------------------|
 | `/api/prices` | `GET /` all prices, `GET /{ticker}`, `GET /{ticker}/history` |
-| `/api/predictions` | `GET /{ticker}`, `POST /{ticker}/train`, `GET /{ticker}/ready` |
-| `/api/stocks` | `GET /{symbol}/quote`, `/ohlcv`, `/indicators`, `/news`, `/pipeline`, `POST /{symbol}/backtest` |
+| `/api/predictions` | `GET /today` all commodities today forecast; `GET /{ticker}/today`; `GET /{ticker}?days=`; `POST /{ticker}/train`; `GET /{ticker}/ready`; `GET /models/status` |
+| `/api/stocks` | `GET /{symbol}/quote`, `/ohlcv`, `/indicators`, `/news`, **`/fusion`**, **`/predictions/history`**, `/pipeline`, `POST /{symbol}/backtest` |
 | `/api/sentiment` | `POST /analyze`, `GET /health` |
 | `/api/alerts` | CRUD alerts, notifications |
 | `/api/export` | CSV/Excel export |
@@ -191,6 +220,40 @@ Content-Type: application/json
 ```
 
 Query `?fast=true` forces keyword-only mode (used for bulk headlines).
+
+### Today’s commodity forecasts
+
+```http
+GET /api/predictions/today?refresh=true
+```
+
+Returns `predictions[]` per ticker: `predicted_price_display`, `last_price_display`, `change_pct`, `display_unit`, `forecast_version`. Refreshes live prices first; cache TTL ~10 minutes.
+
+```http
+GET /api/predictions/GC=F/today
+```
+
+Single-commodity today forecast (same near-spot logic).
+
+### Fusion model (stocks)
+
+```http
+GET /api/stocks/AAPL/fusion
+```
+
+Runs Ridge fusion only (faster than full pipeline); persists forecast and returns `prediction_history`.
+
+```http
+GET /api/stocks/AAPL/predictions/history?limit=30
+```
+
+Stored fusion forecasts vs realized next-session closes (`actual_close`, `error_pct`, forward MAE/MAPE).
+
+```http
+GET /api/stocks/AAPL/pipeline
+```
+
+Full pipeline: price HGBR + sentiment headlines + fusion + `prediction_history`.
 
 ---
 
@@ -233,7 +296,21 @@ BB_{mid} = SMA_{20}(C), \quad BB_{upper/lower} = BB_{mid} \pm 2\sigma
 Price_{INR} = Price_{USD} \times USD\_INR
 \]
 
-(Unit adjustments per commodity in `unit_converter.py`.)
+(Unit adjustments per commodity in `unit_converter.py` — gold/silver/platinum include duty and optional **India retail markup**.)
+
+### Today’s dashboard forecast (near-spot)
+
+\[
+\hat{P}_{today} = P_{live} \times \left(1 + \mathrm{clip}(\bar{r}_{5d}, -1.8\%, +1.8\%)\right)
+\]
+
+where \(P_{live}\) is `display_price` from the live price table and \(\bar{r}_{5d}\) is the mean of recent daily close returns.
+
+### Fusion forward error (when resolved)
+
+\[
+\mathrm{error\_\%} = \frac{|\hat{P} - P_{actual}|}{P_{actual}} \times 100
+\]
 
 ---
 
@@ -277,19 +354,21 @@ Copy [`.env.example`](.env.example) to `.env` only if you use optional API keys 
 | Area | Train manually? | What happens on first use |
 |------|-----------------|---------------------------|
 | **Dashboard, prices, Portfolio, Seasonal, Compare, Heatmap, Correlation** | No | Works after install + `run.bat` |
+| **Dashboard → Today forecast** | No | Auto-loads via `GET /api/predictions/today` (~1–2 min first time; click **Refresh forecasts**) |
 | **Alerts, Export, News, Scraper, MCX, Calendar** | No | Works after install + `run.bat` |
-| **Stocks & TA → ML pipeline** | No | **Fits in memory** each time you run the pipeline (not saved in git) |
+| **Stocks & TA → Fusion panel / ML pipeline** | No | **Fusion:** Run fusion or full pipeline; forecasts stored in `backend/data/fusion_predictions.db` (local) |
 | **Backtest** | No | Uses historical data + rules (no saved model file) |
 | **FinBERT (Sentiment)** | No | **Downloads** pretrained weights (~400 MB) to `backend/.cache/huggingface` on first run — not training |
-| **Predictions (LSTM)** | **Yes, once per commodity** | Models live in `backend/app/models/trained/` (not in git). Use **Predictions → Train Model** per ticker (~2–5 min each), or `POST /api/predictions/train-all` for all tickers (30–60+ min on CPU) |
+| **Predictions (LSTM multi-day)** | **Yes, once per commodity** (optional) | Models in `backend/app/models/trained/` (not in git). **Today’s forecast does not need LSTM.** |
 
-**Bottom line:** The app runs immediately for almost every tab. Only the **commodity LSTM forecast** needs a one-time train per ticker you care about. FinBERT only needs a one-time **download**, then it loads from cache.
+**Bottom line:** The app runs immediately for almost every tab. **Today’s commodity forecasts** and **stock fusion** work without training. Only **multi-day LSTM** on the Predictions tab needs a one-time train per ticker. FinBERT only needs a one-time **download**, then it loads from cache.
 
 **Not in the repo (normal):**
 
 - `backend/.venv/`, `frontend/node_modules/` — create with pip/npm above  
 - `backend/.cache/huggingface/` — FinBERT cache after first Sentiment use  
 - `backend/app/models/trained/*.keras` — LSTM files after you train  
+- `backend/data/fusion_predictions.db` — fusion forecast history (created on first Stocks pipeline/fusion run)  
 
 ### 1. Backend setup
 
@@ -339,6 +418,10 @@ npm run dev
 See [After cloning from GitHub](#after-cloning-from-github) — other tabs do not need this step.
 
 Open **Predictions**, pick a commodity, click **Train Model** once (~2–5 min per ticker). Later predictions load the saved model from `backend/app/models/trained/`.
+
+**Today’s forecast (no train):** Open **Dashboard** — the **Today forecast** column fills automatically. Use **Refresh forecasts** if values look stale. Gold should be near live ₹/10g (e.g. ~₹1.58–1.60L), not ~₹1.33L from old uncached ML.
+
+**Fusion (stocks):** Open **Stocks & TA** → enter a symbol (e.g. `AAPL`) → **Run fusion** or **ML pipeline**. View **Fusion forecast vs actual** after you have run on multiple days.
 
 ### 5. FinBERT (Sentiment tab)
 
@@ -395,8 +478,9 @@ Each member owns ~**20%** of the project. Everyone has **both backend and fronte
 | Feature | Backend | Frontend |
 |---------|---------|----------|
 | **Commodity LSTM** | `services/predictor.py` | `PredictPage.jsx` |
-| **LSTM routes** | *(wired by Member 2)* `routes/predictions.py` | — |
-| **Stock ML pipeline** | `ml/preprocess.py`, `features.py`, `stock_predictor.py`, `fusion_model.py` | — |
+| **Today’s commodity forecast** | `ml/commodity_today.py`, `services/commodity_today_service.py` | `Dashboard.jsx`, `PredictPage.jsx` |
+| **LSTM / today routes** | *(wired by Member 2)* `routes/predictions.py` | — |
+| **Stock ML + fusion** | `ml/preprocess.py`, `features.py`, `stock_predictor.py`, `fusion_model.py`, `prediction_store.py` | `FusionModelPanel.jsx`, `StocksIndicatorsPage.jsx` |
 | **FinBERT** | `ml/sentiment_model.py`, `routes/sentiment.py` | `SentimentQuantPage.jsx` |
 | **Dashboard** | uses Member 2 prices + WebSocket | `Dashboard.jsx` |
 | **Portfolio** | export via Member 3 `export.py` | `PortfolioPage.jsx` |
@@ -409,10 +493,11 @@ Each member owns ~**20%** of the project. Everyone has **both backend and fronte
 | Layer | Path |
 |-------|------|
 | Backend | `backend/app/services/predictor.py` |
-| Backend | `backend/app/ml/preprocess.py`, `features.py`, `stock_predictor.py`, `fusion_model.py` |
+| Backend | `backend/app/ml/commodity_today.py`, `services/commodity_today_service.py` |
+| Backend | `backend/app/ml/preprocess.py`, `features.py`, `stock_predictor.py`, `fusion_model.py`, `services/prediction_store.py` |
 | Backend | `backend/app/ml/sentiment_model.py`, `routes/sentiment.py` |
 | Backend | `backend/app/ml/backtest.py` |
-| Frontend | `frontend/src/components/PredictPage.jsx`, `SentimentQuantPage.jsx` |
+| Frontend | `frontend/src/components/PredictPage.jsx`, `FusionModelPanel.jsx`, `SentimentQuantPage.jsx` |
 | Frontend | `frontend/src/components/Dashboard.jsx`, `PortfolioPage.jsx`, `SeasonalPage.jsx` |
 | Frontend | `frontend/src/components/ComparePage.jsx`, `BacktestQuantPage.jsx` |
 
@@ -420,7 +505,7 @@ Each member owns ~**20%** of the project. Everyone has **both backend and fronte
 
 **FinBERT notes:** weights cached in `backend/.cache/huggingface`; `preload_finbert()` on API startup; Sentiment tab uses full FinBERT, stocks news uses `?fast=true` keyword mode in fusion.
 
-**Viva focus:** log returns vs prices; LSTM vs HistGradientBoosting; FinBERT cache/preload; ML pipeline JSON; backtest Sharpe/drawdown; RMSE/R² on time-ordered splits.
+**Viva focus:** log returns vs prices; LSTM vs near-spot today forecast; fusion storage vs holdout RMSE; FinBERT cache/preload; latest-bar inference; backtest Sharpe/drawdown.
 
 ---
 
@@ -430,7 +515,7 @@ Each member owns ~**20%** of the project. Everyone has **both backend and fronte
 |---------|---------|----------|
 | **FastAPI core** | `main.py`, `core/config.py` | — |
 | **Live prices** | `data_fetcher.py`, `routes/prices.py`, `unit_converter.py`, `price_display.py` | — |
-| **LSTM API wiring** | `routes/predictions.py` → Member 1’s `predictor.py` | — |
+| **Predictions API** | `routes/predictions.py` → LSTM + today forecasts | — |
 | **WebSocket** | `core/websocket_manager.py`, `/ws/prices` | `hooks/useWebSocket.js` |
 | **App platform** | CORS, scheduler, `/health` | `App.jsx`, `main.jsx`, `api/client.js`, `PriceChart.jsx` |
 
@@ -478,7 +563,7 @@ Each member owns ~**20%** of the project. Everyone has **both backend and fronte
 |---------|---------|----------|
 | **Stock data** | `services/stock_data.py` | — |
 | **Indicators** | `services/technical_indicators.py` | overlays on Stocks page |
-| **Stocks API** | `routes/stocks.py` (OHLCV, news, pipeline; backtest POST used by Member 1) | `StocksIndicatorsPage.jsx` |
+| **Stocks API** | `routes/stocks.py` (OHLCV, news, `/fusion`, `/predictions/history`, pipeline; backtest POST used by Member 1) | `StocksIndicatorsPage.jsx`, `FusionModelPanel.jsx` |
 | **Price target** | uses stock quote/history APIs | `PriceTargetPage.jsx` |
 | **Heatmap** *(from Member 5)* | uses `/api/prices` | `HeatmapPage.jsx` |
 
