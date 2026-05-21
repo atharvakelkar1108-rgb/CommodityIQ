@@ -1,9 +1,25 @@
 """Align chart/prediction figures with dashboard display units (unit_converter)."""
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Any, Dict, Tuple
 
 from app.services.unit_converter import convert
+
+
+def live_display_price(data: Dict[str, Any]) -> float:
+    """Dashboard unit price (₹/10g, ₹/kg, ₹/bbl) — not raw contract INR."""
+    if not data:
+        return 0.0
+    dp = data.get("display_price")
+    if dp is not None:
+        try:
+            return float(dp)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(data.get("price_inr") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def usd_to_display(ticker: str, price_usd: float, usd_inr: float) -> Tuple[float, str]:

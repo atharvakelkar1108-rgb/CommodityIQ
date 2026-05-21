@@ -38,7 +38,6 @@ def _configure_hf_cache() -> None:
     _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     hub = str(_CACHE_ROOT / "hub")
     os.environ.setdefault("HF_HOME", str(_CACHE_ROOT))
-    os.environ.setdefault("TRANSFORMERS_CACHE", hub)
     os.environ.setdefault("HF_HUB_CACHE", hub)
 
 
@@ -59,6 +58,8 @@ def _is_permanent_load_failure(exc: BaseException) -> bool:
     if "no module named" in msg:
         return True
     if "disable_finbert" in msg:
+        return True
+    if "keras" in msg and "not yet supported" in msg:
         return True
     return False
 
@@ -105,7 +106,10 @@ def _load_finbert_pipeline():
             else:
                 _PIPELINE = None
             _LOAD_ERROR = str(exc)
-            print(f"[FinBERT] Load failed: {exc}")
+            hint = ""
+            if "keras" in str(exc).lower():
+                hint = " — run: backend\\.venv\\Scripts\\python.exe -m pip install tf-keras"
+            print(f"[FinBERT] Load failed: {exc}{hint}")
         finally:
             _LOADING = False
 

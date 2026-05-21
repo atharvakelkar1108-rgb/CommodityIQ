@@ -22,7 +22,7 @@ IMPORTANT: No hardcoded fallback prices. If all sources fail for a
 """
 
 import asyncio, requests, os
-from app.services.unit_converter import convert as unit_convert, USD_SANITY, INDIA_RETAIL_MARKUP
+from app.services.unit_converter import convert as unit_convert, USD_SANITY
 from app.services.price_display import usd_to_display
 from datetime import datetime
 from typing import Dict, Optional, Tuple
@@ -39,33 +39,17 @@ SESSION.headers.update({
     "Accept": "application/json",
 })
 
-# ── Commodity metadata ────────────────────────────────────────
+# ── Commodity metadata (trimmed to reliable live sources) ───────
 COMMODITIES: Dict[str, dict] = {
-    "GC=F":  {"name":"Gold",          "symbol":"XAU","category":"metals",      "unit":"per oz",     "omkar":"gold"},
-    "SI=F":  {"name":"Silver",        "symbol":"XAG","category":"metals",      "unit":"per oz",     "omkar":"silver"},
-    "HG=F":  {"name":"Copper",        "symbol":"HG", "category":"metals",      "unit":"per lb",     "omkar":"copper"},
-    "PL=F":  {"name":"Platinum",      "symbol":"XPT","category":"metals",      "unit":"per oz",     "omkar":"platinum"},
-    "PA=F":  {"name":"Palladium",     "symbol":"XPD","category":"metals",      "unit":"per oz",     "omkar":"palladium"},
-    "CL=F":  {"name":"Crude Oil WTI", "symbol":"WTI","category":"energy",      "unit":"per bbl",    "omkar":"crude_oil"},
-    "BZ=F":  {"name":"Brent Oil",     "symbol":"BNO","category":"energy",      "unit":"per bbl",    "omkar":"brent_crude_oil"},
-    "NG=F":  {"name":"Natural Gas",   "symbol":"NG", "category":"energy",      "unit":"per MMBtu",  "omkar":"natural_gas"},
-    "RB=F":  {"name":"Gasoline",      "symbol":"RB", "category":"energy",      "unit":"per gal",    "omkar":"gasoline"},
-    "HO=F":  {"name":"Heating Oil",   "symbol":"HO", "category":"energy",      "unit":"per gal",    "omkar":"heating_oil"},
-    "ZW=F":  {"name":"Wheat",         "symbol":"ZW", "category":"agricultural","unit":"per bushel",  "omkar":"wheat"},
-    "ZC=F":  {"name":"Corn",          "symbol":"ZC", "category":"agricultural","unit":"per bushel",  "omkar":"corn"},
-    "ZS=F":  {"name":"Soybeans",      "symbol":"ZS", "category":"agricultural","unit":"per bushel",  "omkar":"soybeans"},
-    "KC=F":  {"name":"Coffee",        "symbol":"KC", "category":"agricultural","unit":"per lb",      "omkar":"coffee"},
-    "SB=F":  {"name":"Sugar",         "symbol":"SB", "category":"agricultural","unit":"per lb",      "omkar":"sugar"},
-    "CT=F":  {"name":"Cotton",        "symbol":"CT", "category":"agricultural","unit":"per lb",      "omkar":"cotton"},
-    "CC=F":  {"name":"Cocoa",         "symbol":"CC", "category":"agricultural","unit":"per MT",      "omkar":"cocoa"},
-    "ZO=F":  {"name":"Oats",          "symbol":"ZO", "category":"agricultural","unit":"per bushel",  "omkar":"oats"},
-    "LE=F":  {"name":"Live Cattle",   "symbol":"LE", "category":"agricultural","unit":"per lb",      "omkar":"live_cattle"},
-    "HE=F":  {"name":"Lean Hogs",     "symbol":"HE", "category":"agricultural","unit":"per lb",      "omkar":"lean_hog"},
-    "LB=F":  {"name":"Lumber",        "symbol":"LB", "category":"agricultural","unit":"per MBF",     "omkar":"lumber"},
+    "GC=F":  {"name":"Gold",          "symbol":"XAU","category":"metals", "unit":"per oz",  "omkar":"gold"},
+    "SI=F":  {"name":"Silver",        "symbol":"XAG","category":"metals", "unit":"per oz",  "omkar":"silver"},
+    "PL=F":  {"name":"Platinum",      "symbol":"XPT","category":"metals", "unit":"per oz",  "omkar":"platinum"},
+    "HG=F":  {"name":"Copper",        "symbol":"HG", "category":"metals", "unit":"per lb",  "omkar":"copper"},
+    "CL=F":  {"name":"Crude Oil WTI", "symbol":"WTI","category":"energy", "unit":"per bbl", "omkar":"crude_oil"},
+    "BZ=F":  {"name":"Brent Oil",     "symbol":"BNO","category":"energy", "unit":"per bbl", "omkar":"brent_crude_oil"},
 }
 
-# Excluded from LSTM prediction tab (still on dashboard); lumber data is often sparse.
-PREDICTION_EXCLUDED = frozenset({"LB=F"})
+PREDICTION_EXCLUDED: frozenset = frozenset()
 
 
 def prediction_tickers() -> list:
@@ -77,19 +61,8 @@ OMKAR_API_KEY = os.environ.get("OMKAR_API_KEY", "")
 
 # Yahoo quotes several futures in cents (or other sub-dollar scales).
 # Convert to USD before INR/unit conversions.
-YAHOO_PRICE_SCALE = {
-    # cents per bushel
-    "ZW=F": 0.01,
-    "ZC=F": 0.01,
-    "ZS=F": 0.01,
-    "ZO=F": 0.01,
-    # cents per pound
-    "CT=F": 0.01,
-    "KC=F": 0.01,
-    "SB=F": 0.01,
-    "LE=F": 0.01,
-    "HE=F": 0.01,
-}
+# Yahoo v8 chart API returns USD for metals/energy; grains use cents (not in core set).
+YAHOO_PRICE_SCALE: Dict[str, float] = {}
 
 
 class DataFetcher:
@@ -114,6 +87,8 @@ class DataFetcher:
         return self._cache
 
     async def get_historical(self, ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
+        if not self._cache:
+            await self.refresh_all_prices()
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, lambda: self._fetch_history(ticker, period, interval))
 
@@ -256,18 +231,6 @@ class DataFetcher:
         # Step 1: Try gold-api.com for all metals (fast, no key)
         metal_prices = self._fetch_gold_api()
 
-        metal_fx: Dict[str, float] = {}
-        try:
-            from app.services.scraper import get_metal_prices_free
-
-            raw_fx = get_metal_prices_free()
-            for key, tick in (("gold", "GC=F"), ("silver", "SI=F"), ("platinum", "PL=F")):
-                v = raw_fx.get(key)
-                if v and self._sanity_usd(tick, v):
-                    metal_fx[tick] = float(v)
-        except Exception as e:
-            print(f"[DataFetcher] metal FX fallback failed: {e}")
-
         live_count = 0
         for ticker, meta in COMMODITIES.items():
             price_usd = None
@@ -280,11 +243,7 @@ class DataFetcher:
                 price_usd = self._sanity_usd(ticker, md["price"])
                 prev_usd  = self._sanity_usd(ticker, md.get("prev")) or price_usd
 
-            if price_usd is None and ticker in metal_fx:
-                price_usd = metal_fx[ticker]
-                prev_usd = price_usd
-
-            # Priority 3: Yahoo Finance (returns today, yesterday)
+            # Priority 2: Yahoo Finance (returns today, yesterday)
             if price_usd is None:
                 today, yesterday = self._fetch_yahoo(ticker)
                 price_usd = self._sanity_usd(ticker, today)
@@ -298,7 +257,8 @@ class DataFetcher:
             if price_usd is None:
                 omkar_name = meta.get("omkar")
                 if omkar_name:
-                    price_usd = self._fetch_omkar(omkar_name)
+                    raw = self._fetch_omkar(omkar_name)
+                    price_usd = self._sanity_usd(ticker, raw)
                     prev_usd  = self._prev_prices.get(ticker, price_usd)
 
             # If all sources fail — use last cached price if available
@@ -345,8 +305,6 @@ class DataFetcher:
         self._using_fallback = live_count == 0
         print(f"[DataFetcher] {live_count}/{len(COMMODITIES)} live · USD/INR={rate:.2f}")
 
-        result = self._overlay_india_retail_prices(result)
-
         gold = result.get("GC=F")
         if gold:
             g10g = gold.get("display_price")
@@ -355,34 +313,6 @@ class DataFetcher:
                 f"(${gold.get('price_usd')}/oz, src={gold.get('display_source', 'intl')})"
             )
 
-        return result
-
-    def _overlay_india_retail_prices(self, result: Dict[str, dict]) -> Dict[str, dict]:
-        """Prefer India retail units (24k/10g gold, silver/kg) from metal FX APIs."""
-        try:
-            from app.services.scraper import scrape_all
-
-            scraped = scrape_all(result, self._usd_inr)
-            indian = scraped.get("indian_prices") or {}
-            mapping = [
-                ("gold", "GC=F", "24k_per_10g", "per 10g"),
-                ("silver", "SI=F", "per_kg", "per kg"),
-                ("platinum", "PL=F", "per_10g", "per 10g"),
-            ]
-            for key, ticker, field, unit in mapping:
-                if key not in indian or ticker not in result:
-                    continue
-                row = indian[key]
-                dp = row.get(field)
-                if dp and float(dp) > 0:
-                    markup = INDIA_RETAIL_MARKUP.get(ticker, 1.0)
-                    result[ticker]["display_price"] = round(float(dp) * markup, 2)
-                    result[ticker]["display_unit"] = unit
-                    result[ticker]["display_source"] = "india_retail"
-                    if row.get("change_pct") is not None:
-                        result[ticker]["change_pct"] = float(row["change_pct"])
-        except Exception as e:
-            print(f"[DataFetcher] India retail overlay failed: {e}")
         return result
 
     # ── Historical data ───────────────────────────────────────
@@ -406,12 +336,18 @@ class DataFetcher:
                 "Close": q.get("close", []),
                 "Volume":q.get("volume",[]),
             }).dropna(subset=["Close"])
-            if ticker in YAHOO_PRICE_SCALE:
-                scale = YAHOO_PRICE_SCALE[ticker]
+            scale = YAHOO_PRICE_SCALE.get(ticker, 1.0)
+            if scale != 1.0:
                 for col in ["Open", "High", "Low", "Close"]:
                     if col in df.columns:
                         df[col] = df[col].astype(float) * scale
-            rate = float(self._get_usd_inr())
+            band = USD_SANITY.get(ticker)
+            if band and "Close" in df.columns:
+                lo, hi = band
+                df = df[(df["Close"].astype(float) >= lo) & (df["Close"].astype(float) <= hi)]
+            if df.empty:
+                return self._synthetic_history(ticker, period)
+            rate = float(self._usd_inr)
             for col in ["Open", "High", "Low", "Close"]:
                 df[f"{col}_INR"] = (df[col].astype(float) * rate).round(2)
                 disp = []
@@ -426,11 +362,39 @@ class DataFetcher:
                         disp.append(np.nan)
                 df[f"{col}_Display"] = np.round(disp, 2)
             df["USD_INR_Rate"] = rate
+            df = self._align_history_display_to_live(ticker, df)
             return df.set_index("Date")
         except Exception as e:
             print(f"[DataFetcher] History failed {ticker}: {e}")
             # Return synthetic from last known price
             return self._synthetic_history(ticker, period)
+
+    def _align_history_display_to_live(self, ticker: str, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Scale historical display OHLC so the last bar matches live dashboard display_price.
+        Keeps chart shape; right edge aligns with the table (same units, same live level).
+        """
+        if df.empty or "Close_Display" not in df.columns:
+            return df
+        cached = self._cache.get(ticker) or {}
+        live = cached.get("display_price")
+        if live is None:
+            return df
+        try:
+            live_f = float(live)
+        except (TypeError, ValueError):
+            return df
+        if live_f <= 0:
+            return df
+        last_disp = float(df["Close_Display"].iloc[-1])
+        if last_disp <= 0:
+            return df
+        if abs(last_disp - live_f) / live_f < 0.004:
+            return df
+        ratio = live_f / last_disp
+        for col in [c for c in df.columns if str(c).endswith("_Display")]:
+            df[col] = (df[col].astype(float) * ratio).round(2)
+        return df
 
     def _synthetic_history(self, ticker: str, period: str) -> pd.DataFrame:
         """Use last known price to generate realistic-looking history."""

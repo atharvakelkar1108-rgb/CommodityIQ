@@ -4,16 +4,9 @@ import { Brain, Loader, TrendingUp, TrendingDown } from 'lucide-react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 import toast from 'react-hot-toast'
 
-const TICKERS = [
-  { ticker:'GC=F', name:'Gold' },       { ticker:'SI=F', name:'Silver' },
-  { ticker:'HG=F', name:'Copper' },     { ticker:'PL=F', name:'Platinum' },
-  { ticker:'CL=F', name:'Crude Oil' },  { ticker:'BZ=F', name:'Brent Oil' },
-  { ticker:'NG=F', name:'Natural Gas'}, { ticker:'ZW=F', name:'Wheat' },
-  { ticker:'ZC=F', name:'Corn' },       { ticker:'ZS=F', name:'Soybeans' },
-  { ticker:'KC=F', name:'Coffee' },     { ticker:'CC=F', name:'Cocoa' },
-  { ticker:'SB=F', name:'Sugar' },      { ticker:'CT=F', name:'Cotton' },
-  { ticker:'LE=F', name:'Live Cattle'},
-]
+import { CORE_COMMODITIES } from '../constants/commodities'
+
+const TICKERS = CORE_COMMODITIES.map(({ ticker, name }) => ({ ticker, name }))
 
 function fmt(n) {
   if (n >= 1e5) return '₹' + (n/1e5).toFixed(2) + 'L'
@@ -81,7 +74,7 @@ export default function PredictPage({ wsData }) {
     setTraining(true)
     try {
       await trainModel(ticker)
-      toast.success('Training started (~2–5 min). When done, Predict uses the saved model — no retrain each visit.')
+      toast.success('Training started (~2–5 min). Uses display units (₹/10g, ₹/kg…) — retrain once after price fixes.')
     }
     catch { toast.error('Training failed to start') }
     setTraining(false)
@@ -111,7 +104,7 @@ export default function PredictPage({ wsData }) {
           {modelReady ? (
             <span style={{ color:'#22c55e', marginLeft:8 }}>✓ model saved for {ticker}</span>
           ) : (
-            <span style={{ color:'#f59e0b', marginLeft:8 }}>— train {ticker} first</span>
+            <span style={{ color:'#f59e0b', marginLeft:8 }}>— click Train Model once (new v3 format)</span>
           )}
         </p>
       </div>

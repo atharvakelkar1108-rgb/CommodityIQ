@@ -4,13 +4,9 @@ import { Search, TrendingUp, TrendingDown } from 'lucide-react'
 import PriceChart from './PriceChart'
 import toast from 'react-hot-toast'
 
-const CATS  = ['All','metals','energy','agricultural']
-const ICONS = {
-  'GC=F':'🥇','SI=F':'🪙','HG=F':'🔶','PL=F':'🔵','PA=F':'🟣',
-  'CL=F':'🛢️','BZ=F':'🛢️','NG=F':'🔥','RB=F':'⛽','HO=F':'🌡️',
-  'ZW=F':'🌾','ZC=F':'🌽','ZS=F':'🫘','KC=F':'☕','SB=F':'🍬',
-  'CT=F':'🌸','CC=F':'🍫','ZO=F':'🌾','LE=F':'🐄','HE=F':'🐷','LB=F':'🪵',
-}
+import { TICKER_ICONS, displayPrice, displayUnit } from '../constants/commodities'
+
+const CATS = ['All', 'metals', 'energy']
 
 function fmtInr(n) {
   if (!n && n !== 0) return '—'
@@ -20,12 +16,8 @@ function fmtInr(n) {
   return '₹' + n.toFixed(2)
 }
 
-function getDisplayPrice(c) {
-  return c.display_price != null ? c.display_price : c.price_inr
-}
-function getDisplayUnit(c) {
-  return c.display_unit || c.unit || ''
-}
+const getDisplayPrice = displayPrice
+const getDisplayUnit = displayUnit
 
 export default function Dashboard({ wsData }) {
   const [rest,     setRest]     = useState([])
@@ -176,7 +168,12 @@ export default function Dashboard({ wsData }) {
       {/* Price chart */}
       {selected && (
         <div style={{marginBottom:'1.5rem'}}>
-          <PriceChart ticker={selected.ticker} name={selected.name} onClose={() => setSelected(null)} />
+          <PriceChart
+            ticker={selected.ticker}
+            name={selected.name}
+            liveQuote={wsData.prices[selected.ticker]}
+            onClose={() => setSelected(null)}
+          />
         </div>
       )}
 
@@ -233,7 +230,7 @@ export default function Dashboard({ wsData }) {
 
                     <td style={{padding:'11px 14px'}}>
                       <div style={{display:'flex',alignItems:'center',gap:10}}>
-                        <span style={{fontSize:20}}>{ICONS[c.ticker]||'📦'}</span>
+                        <span style={{fontSize:20}}>{TICKER_ICONS[c.ticker]||'📦'}</span>
                         <div>
                           <div style={{fontWeight:600,fontSize:13,color:'var(--text-primary)'}}>{c.name}</div>
                           <div style={{fontSize:11,color:'var(--text-muted)'}}>{c.ticker}</div>

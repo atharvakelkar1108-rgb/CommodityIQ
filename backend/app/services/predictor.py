@@ -2,7 +2,7 @@
 predictor.py  — 2D Multivariate LSTM
 ──────────────────────────────────────
 Input features per timestep (7 features):
-  [Close_INR, Open_INR, High_INR, Low_INR, Volume,
+  [Close_Display, Open_Display, High_Display, Low_Display, Volume,
    Daily_Return%, USD_INR_Rate]
 
 Architecture:
@@ -10,7 +10,7 @@ Architecture:
                → LSTM(64)                   → Dropout(0.2)
                → Dense(32, relu)            → Dense(1)
 
-Predicts: next N days Close_INR
+Predicts: next N days close in dashboard display units (₹/10g, ₹/kg, ₹/bbl, …)
 """
 
 import os, math, asyncio
@@ -53,8 +53,8 @@ class LSTMPredictor:
 
     def model_paths(self, ticker: str):
         stem = ticker.replace("=", "_")
-        mp = MODELS_DIR / f"{stem}_2d_disp.keras"
-        sp = MODELS_DIR / f"{stem}_2d_disp_scaler.pkl"
+        mp = MODELS_DIR / f"{stem}_2d_v3.keras"
+        sp = MODELS_DIR / f"{stem}_2d_v3_scaler.pkl"
         return mp, sp
 
     def has_trained_model(self, ticker: str) -> bool:
@@ -64,6 +64,7 @@ class LSTMPredictor:
     async def predict(self, ticker: str, forecast_days: int = FORECAST_DAYS) -> Dict:
         if ticker in PREDICTION_EXCLUDED:
             return {"error": f"{ticker} is not enabled for LSTM prediction."}
+        await self.fetcher.refresh_all_prices()
         model, scaler = await self._load_model(ticker)
         if model is None:
             return {
@@ -78,12 +79,16 @@ class LSTMPredictor:
         if df.empty:
             return {"error": f"No historical data for {ticker}"}
 
-        feat = self._build_features(df)
+        rate = float(self.fetcher._usd_inr)
+        feat = self._build_features(df, ticker, rate)
         if feat is None or len(feat) < LOOKBACK:
             return {"error": f"Not enough data for {ticker}"}
 
+        hist_last = float(feat[-1, 0])
+        disp_last, disp_unit = self._live_display_baseline(ticker, hist_last, rate)
+
         scaled      = scaler.transform(feat)
-        close_idx   = 0                          # Close_INR is column 0
+        close_idx   = 0                          # Close_Display is column 0
         seed        = scaled[-LOOKBACK:].reshape(1, LOOKBACK, N_FEATURES)
 
         predictions_scaled = []
@@ -101,24 +106,23 @@ class LSTMPredictor:
         dummy       = np.zeros((len(predictions_scaled), N_FEATURES))
         dummy[:, 0] = predictions_scaled
         inv         = scaler.inverse_transform(dummy)
-        preds_inr   = inv[:, 0].tolist()
+        preds_raw = inv[:, 0].tolist()
+        preds_display, hist_anchor = self._to_display_scale(
+            ticker, preds_raw, hist_last, disp_last, rate
+        )
+        preds_display = self._anchor_forecast_to_live(
+            preds_display, hist_anchor, disp_last, max_move_pct=4.0
+        )
 
-        last_price = float(feat[-1, 0])          # last Close_Display (dashboard units)
         last_date  = df.index[-1]
-        rate       = float(self.fetcher._usd_inr)
-        disp_last, disp_unit = self._live_display_baseline(ticker, last_price, rate)
         forecast_dates = self._forecast_dates(last_date, forecast_days)
 
         forecast = []
-        for i, price in enumerate(preds_inr):
+        for i, price in enumerate(preds_display):
             fdate = forecast_dates[i] if i < len(forecast_dates) else (
                 pd.Timestamp(last_date).normalize() + pd.Timedelta(days=i + 1)
             )
-            p_model = float(price)
-            if disp_last > 0 and last_price > 0:
-                p_disp = disp_last * (p_model / last_price)
-            else:
-                p_disp = p_model
+            p_disp = float(price)
             change_d = round((p_disp - disp_last) / disp_last * 100, 2) if disp_last else 0.0
             forecast.append({
                 "date":               fdate.strftime("%Y-%m-%d"),
@@ -186,23 +190,88 @@ class LSTMPredictor:
         unit = cached.get("display_unit") or COMMODITIES.get(ticker, {}).get("unit", "")
         return float(hist_last), unit
 
-    def _ohlc_display_series(self, df: pd.DataFrame, col: str, rate: float) -> np.ndarray:
-        disp_col = f"{col}_Display"
-        if disp_col in df.columns:
-            return df[disp_col].values.astype(float)
-        inr_col = f"{col}_INR"
-        if inr_col in df.columns:
-            return df[inr_col].values.astype(float)
-        return (df[col].values.astype(float) * rate)
+    def _ohlc_display_series(
+        self, df: pd.DataFrame, col: str, ticker: str, rate: float
+    ) -> np.ndarray:
+        """Always dashboard units — never raw contract INR (₹/oz for gold)."""
+        from app.services.price_display import usd_to_display
 
-    def _build_features(self, df: pd.DataFrame) -> Optional[np.ndarray]:
-        """Build 7-feature matrix; Close is in dashboard display units (₹/kg, ₹/10g, …)."""
+        disp_col = f"{col}_Display"
+        if disp_col in df.columns and df[disp_col].notna().sum() > 0:
+            return df[disp_col].astype(float).values
+
+        if col in df.columns:
+            out = []
+            for v in df[col].astype(float).values:
+                if v != v or v <= 0:
+                    out.append(np.nan)
+                else:
+                    dp, _ = usd_to_display(ticker, float(v), rate)
+                    out.append(dp)
+            return np.array(out, dtype=float)
+
+        return np.zeros(len(df), dtype=float)
+
+    def _to_display_scale(
+        self,
+        ticker: str,
+        preds: List[float],
+        hist_last: float,
+        disp_last: float,
+        rate: float,
+    ) -> tuple:
+        """
+        Map model outputs to dashboard display units and anchor to live price.
+        Handles legacy models trained on contract INR (much larger than display).
+        """
+        from app.services.price_display import contract_inr_to_display
+
+        anchor = hist_last
+        converted = list(preds)
+
+        if disp_last > 0 and anchor > disp_last * 1.8:
+            converted = [
+                contract_inr_to_display(ticker, float(p), rate)[0] for p in converted
+            ]
+            anchor = contract_inr_to_display(ticker, anchor, rate)[0]
+
+        if disp_last > 0 and anchor > 0 and abs(anchor - disp_last) / disp_last > 0.02:
+            shift = disp_last - anchor
+            converted = [float(p) + shift for p in converted]
+            anchor = disp_last
+
+        return converted, anchor
+
+    @staticmethod
+    def _anchor_forecast_to_live(
+        preds: List[float],
+        anchor: float,
+        disp_last: float,
+        max_move_pct: float = 6.0,
+    ) -> List[float]:
+        """
+        Apply model direction from historical anchor but keep levels near live dashboard price.
+        Stops legacy/wrong-scale models from showing ~₹1.3L when live gold is ~₹1.59L/10g.
+        """
+        if disp_last <= 0:
+            return preds
+        cap = max_move_pct / 100.0
+        out = []
+        for p in preds:
+            move = (float(p) - anchor) / anchor if anchor else 0.0
+            move = max(-cap, min(cap, move))
+            out.append(round(disp_last * (1 + move), 2))
+        return out
+
+    def _build_features(
+        self, df: pd.DataFrame, ticker: str, rate: float
+    ) -> Optional[np.ndarray]:
+        """Build 7-feature matrix; OHLC in dashboard display units (₹/kg, ₹/10g, …)."""
         try:
-            rate   = self.fetcher._usd_inr
-            close  = self._ohlc_display_series(df, "Close", rate)
-            open_  = self._ohlc_display_series(df, "Open", rate)
-            high   = self._ohlc_display_series(df, "High", rate)
-            low    = self._ohlc_display_series(df, "Low", rate)
+            close  = self._ohlc_display_series(df, "Close", ticker, rate)
+            open_  = self._ohlc_display_series(df, "Open", ticker, rate)
+            high   = self._ohlc_display_series(df, "High", ticker, rate)
+            low    = self._ohlc_display_series(df, "Low", ticker, rate)
             vol    = df["Volume"].values.astype(float)
             ret    = np.concatenate([[0], np.diff(close) / (close[:-1] + 1e-9) * 100])
             usd_inr= np.full(len(close), rate)
@@ -243,10 +312,10 @@ class LSTMPredictor:
             return (None, None) if return_objects else {"ticker": ticker, "status": "error", "message": msg}
 
         rate = float(df["USD_INR_Rate"].iloc[-1]) if "USD_INR_Rate" in df.columns else self.fetcher._usd_inr
-        close = self._ohlc_display_series(df, "Close", rate)
-        open_ = self._ohlc_display_series(df, "Open", rate)
-        high  = self._ohlc_display_series(df, "High", rate)
-        low   = self._ohlc_display_series(df, "Low", rate)
+        close = self._ohlc_display_series(df, "Close", ticker, rate)
+        open_ = self._ohlc_display_series(df, "Open", ticker, rate)
+        high  = self._ohlc_display_series(df, "High", ticker, rate)
+        low   = self._ohlc_display_series(df, "Low", ticker, rate)
         vol   = df["Volume"].values.astype(float)
         ret   = np.concatenate([[0], np.diff(close) / (close[:-1] + 1e-9) * 100])
         uinr_rate = float(df["USD_INR_Rate"].iloc[-1]) if "USD_INR_Rate" in df.columns else self.fetcher._usd_inr
@@ -283,8 +352,8 @@ class LSTMPredictor:
         ])
         model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss="huber")
 
-        mp = MODELS_DIR / f"{ticker.replace('=','_')}_2d_disp.keras"
-        sp = MODELS_DIR / f"{ticker.replace('=','_')}_2d_disp_scaler.pkl"
+        mp = MODELS_DIR / f"{ticker.replace('=','_')}_2d_v3.keras"
+        sp = MODELS_DIR / f"{ticker.replace('=','_')}_2d_v3_scaler.pkl"
 
         cbs = [
             EarlyStopping(patience=10, restore_best_weights=True, verbose=0),

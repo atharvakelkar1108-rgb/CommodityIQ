@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -18,7 +19,8 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[App] Starting up — fetching initial prices...")
+    print(f"[App] Starting up — Python {sys.executable}")
+    print("[App] Fetching initial prices...")
     init_db()
     await fetcher.refresh_all_prices()
 

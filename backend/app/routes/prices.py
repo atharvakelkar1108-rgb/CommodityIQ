@@ -12,6 +12,8 @@ GET /api/prices/usd-inr           → current USD/INR exchange rate
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 
+import pandas as pd
+
 from app.services.data_fetcher import DataFetcher, COMMODITIES
 from app.services.price_display import usd_to_display
 
@@ -84,33 +86,36 @@ async def get_history(
     if ticker not in COMMODITIES:
         raise HTTPException(status_code=404, detail=f"Unknown ticker: {ticker}")
 
+    if not fetcher.get_cached():
+        await fetcher.refresh_all_prices()
+
     df = await fetcher.get_historical(ticker, period=period, interval=interval)
     if df.empty:
         raise HTTPException(status_code=503, detail="Historical data unavailable")
+
+    meta = COMMODITIES[ticker]
+    cached = fetcher.get_cached().get(ticker) or {}
+    du = cached.get("display_unit") or meta.get("unit", "")
+    live_display = cached.get("display_price")
 
     # Convert DataFrame → list of dicts for JSON response
     df = df.reset_index()
     rate = float(fetcher._usd_inr)
     records = []
-    du = ""
     for _, row in df.iterrows():
         c_raw = float(row.get("Close_INR", 0) or 0)
         o_raw = float(row.get("Open_INR", 0) or 0)
         h_raw = float(row.get("High_INR", 0) or 0)
         l_raw = float(row.get("Low_INR", 0) or 0)
-        # Prefer precomputed display columns (same path as dashboard unit_converter)
-        if "Close_Display" in row and row.get("Close_Display") == row.get("Close_Display"):
-            d_close = float(row["Close_Display"])
-            d_open = float(row.get("Open_Display", d_close))
-            d_high = float(row.get("High_Display", d_close))
-            d_low = float(row.get("Low_Display", d_close))
-            _, du = usd_to_display(ticker, float(row.get("Close", c_raw / rate) or 0), rate)
-        else:
-            close_usd = float(row.get("Close", c_raw / rate) or 0) if rate else 0
-            d_close, du = usd_to_display(ticker, close_usd, rate)
-            d_open, _ = usd_to_display(ticker, float(row.get("Open", o_raw / rate) or 0), rate)
-            d_high, _ = usd_to_display(ticker, float(row.get("High", h_raw / rate) or 0), rate)
-            d_low, _ = usd_to_display(ticker, float(row.get("Low", l_raw / rate) or 0), rate)
+        close_usd = float(row.get("Close", 0) or 0)
+        if close_usd <= 0 and rate > 0:
+            close_usd = c_raw / rate
+
+        d_close = float(row["Close_Display"]) if pd.notna(row.get("Close_Display")) else usd_to_display(ticker, close_usd, rate)[0]
+        d_open = float(row.get("Open_Display", d_close)) if pd.notna(row.get("Open_Display")) else usd_to_display(ticker, float(row.get("Open", 0) or 0), rate)[0]
+        d_high = float(row.get("High_Display", d_close)) if pd.notna(row.get("High_Display")) else usd_to_display(ticker, float(row.get("High", 0) or 0), rate)[0]
+        d_low = float(row.get("Low_Display", d_close)) if pd.notna(row.get("Low_Display")) else usd_to_display(ticker, float(row.get("Low", 0) or 0), rate)[0]
+
         records.append({
             "date":              str(row.get("Date", row.get("Datetime", ""))),
             "open_inr":          round(o_raw, 2),
@@ -124,14 +129,17 @@ async def get_history(
             "volume":            int(row.get("Volume", 0)),
         })
 
-    meta = COMMODITIES[ticker]
+    if records and live_display is not None:
+        records[-1]["display_close_inr"] = round(float(live_display), 2)
+
     return {
         "ticker":        ticker,
         "name":          meta["name"],
         "currency":      "INR",
         "period":        period,
         "interval":      interval,
-        "display_unit":  du or meta.get("unit", ""),
+        "display_unit":  du,
+        "live_display_price": live_display,
         "records":       records,
-        "note":          "display_*_inr matches dashboard Indian units; raw *_INR is contract×INR.",
+        "note":          "Chart uses display_*_inr (same units as dashboard). Older dates reflect past USD spot at today's FX.",
     }

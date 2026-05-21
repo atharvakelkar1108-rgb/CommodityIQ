@@ -22,13 +22,14 @@ BUSHEL_KG = {
 }
 
 # Import duty + GST multipliers (approximate)
-# Extra uplift so dashboard per-10g gold aligns with Indian retail/MCX quotes (~1.58–1.60L)
+# Small uplift so dashboard aligns with India retail portals (Goodreturns / MCX-style).
 INDIA_DISPLAY_FACTOR = {
-    "GC=F": 1.042,
+    "GC=F": 1.042,   # ~₹1.58–1.60L / 10g
     "PL=F": 1.042,
-    "PA=F": 1.042,
-    "SI=F": 1.02,
 }
+
+# India retail uplift for silver ₹/kg (~2.85–2.90L vs ~2.55L spot+duty only)
+SILVER_INDIA_RETAIL = 1.11
 
 DUTY = {
     "metals":      1.09,    # Gold/Silver: 6% customs + 3% GST
@@ -37,21 +38,14 @@ DUTY = {
     "agricultural":1.05,    # ~5%
 }
 
-# Extra alignment for India retail portals (Goodreturns/MCX-style 24k quotes)
-INDIA_RETAIL_MARKUP = {
-    "GC=F": 1.045,
-    "PL=F": 1.04,
-    "PA=F": 1.04,
-}
-
 # Sanity bands for USD futures (reject bad Yahoo/API spikes)
 USD_SANITY = {
     "GC=F": (2800, 5200),
     "SI=F": (18, 120),
     "PL=F": (800, 3500),
-    "PA=F": (800, 5000),
     "HG=F": (2, 15),
     "CL=F": (40, 200),
+    "BZ=F": (40, 200),
 }
 
 def convert(ticker: str, price_usd: float, usd_inr: float) -> dict:
@@ -59,10 +53,9 @@ def convert(ticker: str, price_usd: float, usd_inr: float) -> dict:
     p    = price_usd * usd_inr   # base INR price
     out  = {}
 
-    if ticker in ("GC=F", "PL=F", "PA=F"):   # Gold, Platinum, Palladium ($/oz)
+    if ticker in ("GC=F", "PL=F"):   # Gold, Platinum ($/oz)
         duty      = DUTY["metals"]
-        retail    = INDIA_RETAIL_MARKUP.get(ticker, 1.0)
-        per_gram  = round(p / OZ_TO_G * duty * retail, 2)
+        per_gram  = round(p / OZ_TO_G * duty, 2)
         per_10g   = round(per_gram * 10, 2)
         per_oz    = round(p * duty, 2)
         out = {
@@ -77,9 +70,9 @@ def convert(ticker: str, price_usd: float, usd_inr: float) -> dict:
 
     elif ticker == "SI=F":   # Silver ($/oz)
         duty      = DUTY["metals"]
-        per_gram  = round(p / OZ_TO_G * duty, 2)
+        per_gram  = round(p / OZ_TO_G * duty * SILVER_INDIA_RETAIL, 2)
         per_kg    = round(per_gram * 1000, 2)
-        per_oz    = round(p * duty, 2)
+        per_oz    = round(p * duty * SILVER_INDIA_RETAIL, 2)
         out = {
             "display_price": per_kg,
             "display_unit":  "per kg",

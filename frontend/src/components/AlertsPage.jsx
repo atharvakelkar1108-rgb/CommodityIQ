@@ -3,8 +3,9 @@ import { fetchAlerts, createAlert, deleteAlert, disableAlert, fetchNotifications
 import { Bell, Trash2, PauseCircle, Plus } from 'lucide-react'
 import toast from 'react-hot-toast'
 
-const TICKERS = ['GC=F','SI=F','HG=F','PL=F','PA=F','CL=F','BZ=F','NG=F','RB=F','HO=F',
-                 'ZW=F','ZC=F','ZS=F','KC=F','SB=F','CT=F','CC=F','ZO=F','LE=F','HE=F','LB=F']
+import { CORE_COMMODITIES } from '../constants/commodities'
+
+const TICKERS = CORE_COMMODITIES.map((c) => c.ticker)
 const ALERT_TYPES = [
   { value:'PRICE_ABOVE', label:'Price Above ₹' },
   { value:'PRICE_BELOW', label:'Price Below ₹' },

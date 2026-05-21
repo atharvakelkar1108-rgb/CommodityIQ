@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { fetchHistory } from '../api/client'
 import { X } from 'lucide-react'
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
+import { displayPrice } from '../constants/commodities'
 
 const PERIODS = ['1mo','3mo','6mo','1y','2y']
 function fmt(n) {
@@ -20,10 +21,11 @@ const CustomTooltip = ({ active, payload }) => {
   )
 }
 
-export default function PriceChart({ ticker, name, onClose }) {
+export default function PriceChart({ ticker, name, onClose, liveQuote }) {
   const [data,    setData]    = useState([])
   const [period,  setPeriod]  = useState('3mo')
   const [unit,    setUnit]    = useState('')
+  const [liveNow, setLiveNow] = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -37,6 +39,7 @@ export default function PriceChart({ ticker, name, onClose }) {
           display_close_inr: d.display_close_inr,
         })).filter((d) => d.display_close_inr != null && !Number.isNaN(d.display_close_inr))
         setUnit(r.data.display_unit || '')
+        setLiveNow(r.data.live_display_price ?? displayPrice(liveQuote) ?? null)
         setData(records)
         setLoading(false)
       })
@@ -57,9 +60,17 @@ export default function PriceChart({ ticker, name, onClose }) {
           <div style={{ fontSize:16, fontWeight:700, color:'#e2e8f0' }}>{name} — Price History</div>
           <div style={{ fontSize:12, color:'#64748b', marginTop:2 }}>
             {unit ? <span style={{ marginRight: 8 }}>{unit} ·</span> : null}
-            {period} change:{' '}
-            <span style={{ color: isUp ? '#22c55e' : '#ef4444', fontWeight:600 }}>
-              {isUp ? '+' : ''}{change}%
+            Same units as dashboard
+            {liveNow != null && (
+              <span style={{ marginLeft: 8, color: '#94a3b8' }}>
+                · Live now <strong style={{ color: '#e2e8f0' }}>{fmt(liveNow)}</strong>
+              </span>
+            )}
+            <span style={{ marginLeft: 8 }}>
+              · {period} change:{' '}
+              <span style={{ color: isUp ? '#22c55e' : '#ef4444', fontWeight:600 }}>
+                {isUp ? '+' : ''}{change}%
+              </span>
             </span>
           </div>
         </div>
@@ -92,6 +103,10 @@ export default function PriceChart({ ticker, name, onClose }) {
               tickFormatter={v => v?.slice(5)} interval="preserveStartEnd" />
             <YAxis tick={{ fontSize:10, fill:'#475569' }} tickFormatter={v => fmt(v)} width={72} />
             <Tooltip content={<CustomTooltip />} />
+            {liveNow != null && (
+              <ReferenceLine y={liveNow} stroke="#6366f1" strokeDasharray="4 4"
+                label={{ value: 'Live', fill: '#818cf8', fontSize: 10, position: 'insideTopRight' }} />
+            )}
             <Area type="monotone" dataKey="display_close_inr"
               stroke={isUp ? '#22c55e' : '#ef4444'} strokeWidth={2}
               fill={'url(#g' + ticker + ')'} dot={false}

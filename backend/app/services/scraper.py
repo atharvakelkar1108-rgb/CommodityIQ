@@ -127,22 +127,28 @@ def calc_indian(metals: Dict, usd_inr: float) -> Dict:
     return result
 
 
+def _metals_from_cache(cached_prices: Dict, usd_inr: float) -> Dict:
+    """Use the same USD spot as the live price feed (gold-api / Yahoo)."""
+    metals = {}
+    if not cached_prices:
+        return metals
+    for yahoo, key in [("GC=F", "gold"), ("SI=F", "silver"), ("PL=F", "platinum")]:
+        p = cached_prices.get(yahoo, {})
+        usd = p.get("price_usd")
+        if usd and float(usd) > 0:
+            metals[key] = float(usd)
+            metals[f"{key}_change"] = p.get("change_pct", 0)
+    return metals
+
+
 def scrape_all(cached_prices: Dict = None, usd_inr: float = None) -> Dict:
     if not usd_inr:
         usd_inr = get_usd_inr()
 
-    metals = get_metal_prices_free()
-
-    # Fallback: use cached Yahoo prices if all APIs fail
-    if not metals.get("gold") and cached_prices:
-        print("[Scraper] Using Yahoo cache as fallback")
-        for yahoo, key in [("GC=F","gold"),("SI=F","silver"),("PL=F","platinum")]:
-            p = cached_prices.get(yahoo, {})
-            usd = p.get("price_usd") or p.get("price_inr", 0) / usd_inr
-            if usd and float(usd) > 0:
-                metals[key]            = float(usd)
-                metals[key+"_change"]  = p.get("change_pct", 0)
-                print(f"[Scraper] Yahoo fallback {key}: ${usd:.2f}")
+    metals = _metals_from_cache(cached_prices or {}, usd_inr)
+    if not metals.get("gold"):
+        print("[Scraper] No cached metals — trying frankfurter/er-api fallback")
+        metals = get_metal_prices_free()
 
     indian = calc_indian(metals, usd_inr)
 
@@ -159,9 +165,9 @@ def scrape_all(cached_prices: Dict = None, usd_inr: float = None) -> Dict:
         mcx["SILVERM"]   = {"price": s["per_kg"],       "unit": "per kg",   "change_pct": s["change_pct"]}
     if cached_prices:
         for ticker, sym, factor, unit in [
-            ("HG=F","COPPER",   2.20462 * DUTY_BASE, "per kg"),
-            ("CL=F","CRUDEOIL", DUTY_BASE,            "per bbl"),
-            ("NG=F","NATURALGAS",DUTY_BASE,            "per MMBtu"),
+            ("HG=F", "COPPER", 1 / 0.453592 * DUTY_BASE, "per kg"),
+            ("CL=F", "CRUDEOIL", DUTY_BASE, "per bbl"),
+            ("BZ=F", "CRUDEOILM", DUTY_BASE, "per bbl"),
         ]:
             p = cached_prices.get(ticker, {})
             if p.get("price_usd"):

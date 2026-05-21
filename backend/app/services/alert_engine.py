@@ -121,17 +121,19 @@ class AlertEngine:
             if not data:
                 continue
 
-            price_inr  = data.get("price_inr", 0)
+            from app.services.price_display import live_display_price
+
+            price_val  = live_display_price(data)
             change_pct = abs(data.get("change_pct", 0))
 
             fired = False
             value = None
 
-            if alert.alert_type == AlertType.PRICE_ABOVE and price_inr >= alert.threshold:
-                fired, value = True, price_inr
+            if alert.alert_type == AlertType.PRICE_ABOVE and price_val >= alert.threshold:
+                fired, value = True, price_val
 
-            elif alert.alert_type == AlertType.PRICE_BELOW and price_inr <= alert.threshold:
-                fired, value = True, price_inr
+            elif alert.alert_type == AlertType.PRICE_BELOW and price_val <= alert.threshold:
+                fired, value = True, price_val
 
             elif alert.alert_type == AlertType.CHANGE_PCT and change_pct >= alert.threshold:
                 fired, value = True, change_pct

@@ -2,13 +2,9 @@ import { useState, useEffect } from 'react'
 import { fetchHistory } from '../api/client'
 import { Info } from 'lucide-react'
 
-const TICKERS = [
-  {ticker:'GC=F',name:'Gold'},     {ticker:'SI=F',name:'Silver'},
-  {ticker:'HG=F',name:'Copper'},   {ticker:'PL=F',name:'Platinum'},
-  {ticker:'CL=F',name:'Crude Oil'},{ticker:'NG=F',name:'Nat. Gas'},
-  {ticker:'ZW=F',name:'Wheat'},    {ticker:'ZC=F',name:'Corn'},
-  {ticker:'ZS=F',name:'Soybeans'},{ticker:'KC=F',name:'Coffee'},
-]
+import { CORE_COMMODITIES } from '../constants/commodities'
+
+const TICKERS = CORE_COMMODITIES.map(({ ticker, name }) => ({ ticker, name }))
 
 function pearsonCorr(x, y) {
   const n   = Math.min(x.length, y.length)
@@ -51,8 +47,9 @@ export default function CorrelationPage() {
           name:   t.name,
           returns: (r.data.records||[]).map((rec,i,arr) => {
             if (i===0) return null
-            const prev = arr[i-1].close_inr
-            return prev ? (rec.close_inr - prev)/prev*100 : null
+            const prev = arr[i-1].display_close_inr ?? arr[i-1].close_inr
+            const curr = rec.display_close_inr ?? rec.close_inr
+            return prev ? (curr - prev)/prev*100 : null
           }).filter(v=>v!==null)
         }))
         .catch(()=>({ ticker:t.ticker, name:t.name, returns:[] }))

@@ -3,16 +3,9 @@ import { PlusCircle, Trash2, TrendingUp, TrendingDown, PieChart } from 'lucide-r
 import { PieChart as RechartsPie, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import toast from 'react-hot-toast'
 
-const TICKERS = [
-  {ticker:'GC=F',name:'Gold'},      {ticker:'SI=F',name:'Silver'},
-  {ticker:'HG=F',name:'Copper'},    {ticker:'PL=F',name:'Platinum'},
-  {ticker:'CL=F',name:'Crude Oil'}, {ticker:'BZ=F',name:'Brent Oil'},
-  {ticker:'NG=F',name:'Natural Gas'},{ticker:'ZW=F',name:'Wheat'},
-  {ticker:'ZC=F',name:'Corn'},      {ticker:'ZS=F',name:'Soybeans'},
-  {ticker:'KC=F',name:'Coffee'},    {ticker:'CC=F',name:'Cocoa'},
-  {ticker:'SB=F',name:'Sugar'},     {ticker:'CT=F',name:'Cotton'},
-  {ticker:'LE=F',name:'Live Cattle'},{ticker:'LB=F',name:'Lumber'},
-]
+import { CORE_COMMODITIES, displayPrice } from '../constants/commodities'
+
+const TICKERS = CORE_COMMODITIES.map(({ ticker, name }) => ({ ticker, name }))
 const COLORS = ['#6366f1','#22c55e','#f59e0b','#ef4444','#14b8a6','#8b5cf6','#ec4899','#0ea5e9']
 const STORAGE_KEY = 'commodityiq_portfolio'
 
@@ -60,7 +53,7 @@ export default function PortfolioPage({ wsData }) {
   // Enrich with live prices
   const enriched = holdings.map(h => {
     const live       = wsData.prices[h.ticker]
-    const curr_price = live?.price_inr || h.buy_price
+    const curr_price = (live ? displayPrice(live) : null) || h.buy_price
     const curr_value = curr_price * h.quantity
     const cost_basis = h.buy_price * h.quantity
     const pnl        = curr_value - cost_basis
@@ -142,7 +135,9 @@ export default function PortfolioPage({ wsData }) {
           <div style={{ fontSize:11, color:'#475569', marginBottom:12 }}>
             💡 Tip: Live price for {TICKERS.find(t=>t.ticker===form.ticker)?.name} is{' '}
             <span style={{color:'#e2e8f0',fontWeight:600}}>
-              {wsData.prices[form.ticker] ? fmt(wsData.prices[form.ticker].price_inr) : 'loading...'}
+              {wsData.prices[form.ticker] ? fmt(displayPrice(wsData.prices[form.ticker])) : 'loading...'}
+            {' '}
+            {wsData.prices[form.ticker]?.display_unit ? `(${wsData.prices[form.ticker].display_unit})` : ''}
             </span>
           </div>
           <div style={{ display:'flex', gap:8 }}>

@@ -6,15 +6,9 @@ import {
   Tooltip, ResponsiveContainer, Legend
 } from 'recharts'
 
-const ALL_TICKERS = [
-  {ticker:'GC=F',name:'Gold'},      {ticker:'SI=F',name:'Silver'},
-  {ticker:'HG=F',name:'Copper'},    {ticker:'PL=F',name:'Platinum'},
-  {ticker:'CL=F',name:'Crude Oil'}, {ticker:'BZ=F',name:'Brent Oil'},
-  {ticker:'NG=F',name:'Natural Gas'},{ticker:'ZW=F',name:'Wheat'},
-  {ticker:'ZC=F',name:'Corn'},      {ticker:'ZS=F',name:'Soybeans'},
-  {ticker:'KC=F',name:'Coffee'},    {ticker:'CC=F',name:'Cocoa'},
-  {ticker:'LE=F',name:'Live Cattle'},{ticker:'LB=F',name:'Lumber'},
-]
+import { CORE_COMMODITIES, displayPrice } from '../constants/commodities'
+
+const ALL_TICKERS = CORE_COMMODITIES.map(({ ticker, name }) => ({ ticker, name }))
 const COLORS  = ['#6366f1','#22c55e','#f59e0b','#ef4444','#14b8a6','#ec4899']
 const PERIODS = ['1mo','3mo','6mo','1y','2y']
 
@@ -147,7 +141,7 @@ export default function ComparePage({ wsData }) {
                 <div style={{ width:10, height:10, borderRadius:2, background:COLORS[i%COLORS.length] }}/>
                 <span style={{ color:'#e2e8f0', fontWeight:500 }}>{meta?.name || t}</span>
                 {live && <span style={{ color:COLORS[i%COLORS.length], fontWeight:600 }}>
-                  {live.price_inr>=1e5?'₹'+(live.price_inr/1e5).toFixed(1)+'L':'₹'+live.price_inr?.toLocaleString('en-IN',{maximumFractionDigits:0})}
+                  {fmt(displayPrice(live))}
                 </span>}
                 <button onClick={()=>removeTicker(t)}
                   style={{ background:'none', border:'none', color:'#64748b', cursor:'pointer',

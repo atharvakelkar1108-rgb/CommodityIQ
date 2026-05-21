@@ -4,17 +4,15 @@ import { Target, Calendar, TrendingUp, TrendingDown, Brain, Loader } from 'lucid
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea } from 'recharts'
 import toast from 'react-hot-toast'
 
-const TICKERS = [
-  {ticker:'GC=F',name:'Gold',unit:'per 10g'},
-  {ticker:'SI=F',name:'Silver',unit:'per kg'},
-  {ticker:'HG=F',name:'Copper',unit:'per kg'},
-  {ticker:'CL=F',name:'Crude Oil',unit:'per bbl'},
-  {ticker:'NG=F',name:'Natural Gas',unit:'per MMBtu'},
-  {ticker:'ZW=F',name:'Wheat',unit:'per quintal'},
-  {ticker:'ZC=F',name:'Corn',unit:'per quintal'},
-  {ticker:'KC=F',name:'Coffee',unit:'per kg'},
-  {ticker:'CC=F',name:'Cocoa',unit:'per MT'},
-]
+import { CORE_COMMODITIES } from '../constants/commodities'
+
+const DISPLAY_UNITS = {
+  'GC=F': 'per 10g', 'SI=F': 'per kg', 'PL=F': 'per 10g', 'HG=F': 'per kg',
+  'CL=F': 'per bbl', 'BZ=F': 'per bbl',
+}
+const TICKERS = CORE_COMMODITIES.map(({ ticker, name }) => ({
+  ticker, name, unit: DISPLAY_UNITS[ticker] || 'per unit',
+}))
 
 /** First forecast day where price crosses target (not “already past” on day 1). */
 function findTargetHitDay(forecast, baseline, targetPrice) {

@@ -26,7 +26,7 @@ class CreateAlertRequest(BaseModel):
     ticker:     str         = Field(..., example="GC=F")
     alert_type: AlertType   = Field(..., example="PRICE_ABOVE")
     threshold:  float       = Field(..., example=197000.0,
-                                    description="Threshold in INR")
+                                    description="Threshold in dashboard units (e.g. ₹/10g for gold)")
     label:      Optional[str] = Field(None, example="Gold hits 1.97L")
 
 

@@ -2,21 +2,17 @@ import { useState, useEffect } from 'react'
 import { fetchHistory } from '../api/client'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine } from 'recharts'
 
-const TICKERS = [
-  {ticker:'GC=F',name:'Gold'},    {ticker:'SI=F',name:'Silver'},
-  {ticker:'CL=F',name:'Crude Oil'},{ticker:'NG=F',name:'Natural Gas'},
-  {ticker:'ZW=F',name:'Wheat'},   {ticker:'ZC=F',name:'Corn'},
-  {ticker:'KC=F',name:'Coffee'},  {ticker:'CC=F',name:'Cocoa'},
-  {ticker:'HG=F',name:'Copper'},  {ticker:'ZS=F',name:'Soybeans'},
-]
+import { CORE_COMMODITIES } from '../constants/commodities'
+
+const TICKERS = CORE_COMMODITIES.map(({ ticker, name }) => ({ ticker, name }))
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
 function calcSeasonality(records) {
   // Group daily returns by month, average them
   const monthly = Array(12).fill(null).map(() => [])
   for (let i = 1; i < records.length; i++) {
-    const prev  = records[i-1].close_inr
-    const curr  = records[i].close_inr
+    const prev  = records[i-1].display_close_inr ?? records[i-1].close_inr
+    const curr  = records[i].display_close_inr ?? records[i].close_inr
     if (!prev || !curr) continue
     const ret   = (curr - prev) / prev * 100
     const month = new Date(records[i].date).getMonth()

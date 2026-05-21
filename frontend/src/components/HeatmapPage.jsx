@@ -1,11 +1,5 @@
-import { useState, useEffect } from 'react'
-
-const ICONS = {
-  'GC=F':'🥇','SI=F':'🪙','HG=F':'🔶','PL=F':'🔵','PA=F':'🟣',
-  'CL=F':'🛢️','BZ=F':'🛢️','NG=F':'🔥','RB=F':'⛽','HO=F':'🌡️',
-  'ZW=F':'🌾','ZC=F':'🌽','ZS=F':'🫘','KC=F':'☕','SB=F':'🍬',
-  'CT=F':'🌸','CC=F':'🍫','ZO=F':'🌾','LE=F':'🐄','HE=F':'🐷','LB=F':'🪵',
-}
+import { useState } from 'react'
+import { TICKER_ICONS, displayPrice } from '../constants/commodities'
 
 function getColor(chg) {
   if (chg >= 3)   return { bg:'#14532d', border:'#22c55e', text:'#86efac' }
@@ -30,14 +24,14 @@ export default function HeatmapPage({ wsData }) {
   const [sortBy, setSortBy] = useState('change')
   const [tooltip, setTooltip] = useState(null)
 
-  const CATS = ['All','metals','energy','agricultural']
+  const CATS = ['All', 'metals', 'energy']
 
   const prices = Object.values(wsData.prices)
   const filtered = prices
     .filter(c => filter === 'All' || c.category === filter)
     .sort((a,b) => {
       if (sortBy === 'change') return b.change_pct - a.change_pct
-      if (sortBy === 'price')  return b.price_inr  - a.price_inr
+      if (sortBy === 'price')  return displayPrice(b) - displayPrice(a)
       return (a.name||'').localeCompare(b.name||'')
     })
 
@@ -136,12 +130,12 @@ export default function HeatmapPage({ wsData }) {
                 onMouseOver={e => { e.currentTarget.style.transform='scale(1.03)'; e.currentTarget.style.zIndex=10 }}
                 onMouseOut={e  => { e.currentTarget.style.transform='scale(1)';    e.currentTarget.style.zIndex=1  }}>
                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                  <span style={{fontSize:18}}>{ICONS[c.ticker]||'📦'}</span>
+                  <span style={{fontSize:18}}>{TICKER_ICONS[c.ticker]||'📦'}</span>
                   <span style={{fontSize:10,color:clr.text,opacity:0.7}}>{c.symbol}</span>
                 </div>
                 <div>
                   <div style={{fontSize:12,fontWeight:700,color:clr.text,marginBottom:2}}>{c.name}</div>
-                  <div style={{fontSize:11,color:clr.text,opacity:0.8,marginBottom:4}}>{fmt(c.price_inr)}</div>
+                  <div style={{fontSize:11,color:clr.text,opacity:0.8,marginBottom:4}}>{fmt(displayPrice(c))}</div>
                   <div style={{fontSize:16,fontWeight:800,color:clr.text}}>
                     {up?'▲':'▼'} {Math.abs(chg).toFixed(2)}%
                   </div>
@@ -161,7 +155,7 @@ export default function HeatmapPage({ wsData }) {
           boxShadow:'0 8px 32px rgba(0,0,0,0.5)'
         }}>
           <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
-            <span style={{fontSize:24}}>{ICONS[tooltip.ticker]||'📦'}</span>
+            <span style={{fontSize:24}}>{TICKER_ICONS[tooltip.ticker]||'📦'}</span>
             <div>
               <div style={{fontSize:14,fontWeight:700,color:'#e2e8f0'}}>{tooltip.name}</div>
               <div style={{fontSize:11,color:'#64748b'}}>{tooltip.ticker} · {tooltip.unit}</div>
@@ -169,7 +163,7 @@ export default function HeatmapPage({ wsData }) {
           </div>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
             {[
-              {l:'Price (₹)',  v:fmt(tooltip.price_inr)},
+              {l:'Price (₹)',  v:fmt(displayPrice(tooltip)) + (tooltip.display_unit ? ' ' + tooltip.display_unit : '')},
               {l:'Price (USD)',v:'$'+(tooltip.price_usd||0).toFixed(2)},
               {l:'Change',     v:(tooltip.change_pct>=0?'+':'')+tooltip.change_pct?.toFixed(2)+'%'},
               {l:'USD/INR',    v:'₹'+tooltip.usd_inr},
